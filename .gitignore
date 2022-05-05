@@ -1,3 +1,7 @@
-libipopt.so
+build
+__pycache__
+venv
+libipopt.so*
 cppad_include
+ipopt_include
 
