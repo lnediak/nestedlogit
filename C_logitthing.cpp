@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <memory>
 #include <string>
 
@@ -67,15 +68,18 @@ struct Dataset {
         eiter->z = zp += zstride;
       }
       if (iter->i) {
-        std::memcpy(xp + (iter->i - 1), iter->x, sizeof(double) * xsz);
+        std::memcpy(xp + (iter->i - 1) * xsz, iter->x, sizeof(double) * xsz);
         zp[iter->i - 1] = true;
       }
       np[iter->i] = iter->n;
       // to avoid the one-past-end iter
       if (i--) {
         ++iter;
+      } else {
+        break;
       }
     }
+    return true;
   }
 };
 
@@ -109,7 +113,7 @@ struct FG_eval {
       }
       t += std::lgamma(nt + 1) - lnt + tmp1 - nt * CppAD::log1p(tmp2);
     }
-    fg[0] = t;
+    fg[0] = -t;
   }
 };
 
@@ -166,20 +170,40 @@ PyObject *solve(PyObject *, PyObject *args) {
   if (!t || !i || !x || !n) {
     return NULL;
   }
+  Py_INCREF(t);
+  Py_INCREF(i);
+  Py_INCREF(x);
+  Py_INCREF(n);
   long xsz = PyArray_DIM(x, 1);
   npy_intp sz = PyArray_DIM(t, 0);
   Dataset dataset(isz, xsz);
   // XXX: generalize t, i, n type here
   dataset.initData(
       SolveIter<std::int64_t, std::int64_t, std::int64_t>(t, i, x, n, xsz), sz);
+  for (const Dataset::Entry &e : dataset.entries) {
+    std::cout << "t: " << e.t << std::endl;
+    std::cout << "x: ";
+    for (long i = 0; i < isz * xsz; i++) {
+      std::cout << e.x[i] << " ";
+    }
+    std::cout << std::endl << "n: ";
+    for (long i = 0; i <= isz; i++) {
+      std::cout << e.n[i] << " ";
+    }
+    std::cout << std::endl << "z: ";
+    for (long i = 0; i < isz; i++) {
+      std::cout << e.z[i] << " ";
+    }
+    std::cout << std::endl << std::endl;
+  }
 
   typedef CPPAD_TESTVECTOR(double) Dvector;
   std::size_t betasz = isz * xsz;
   Dvector bi(betasz), bl(betasz), bu(betasz);
-  std::memset(&bi[0], 0, sizeof(double) * xsz);
+  std::memset(&bi[0], 0, sizeof(double) * betasz);
   for (long ii = xsz; ii--;) {
-    bl[ii] = -1e20;
-    bu[ii] = 1e20;
+    bl[ii] = -1e19;
+    bu[ii] = 1e19;
   }
   CppAD::ipopt::solve_result<Dvector> solution;
   FG_eval fg_eval{dataset};
@@ -188,9 +212,13 @@ PyObject *solve(PyObject *, PyObject *args) {
                                         solution);
   assert(solution.status == decltype(solution)::success);
   npy_intp tmp[2] = {isz, xsz};
-  PyObject *ret = PyArray_Zeros(2, tmp, PyArray_DescrFromType(NPY_DOUBLE), 0);
+  PyObject *ret = PyArray_ZEROS(2, tmp, NPY_DOUBLE, 0);
   std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(ret)),
-              &solution.x[0], sizeof(double) * xsz);
+              &solution.x[0], sizeof(double) * betasz);
+  Py_DECREF(t);
+  Py_DECREF(i);
+  Py_DECREF(x);
+  Py_DECREF(n);
   return ret;
 }
 
@@ -203,6 +231,7 @@ PyModuleDef C_logitthingModule = {PyModuleDef_HEAD_INIT, "_C_logitthing", NULL,
 } // namespace
 
 PyMODINIT_FUNC PyInit__C_logitthing() {
+  import_array();
   return PyModule_Create(&C_logitthingModule);
 }
 
