@@ -180,6 +180,7 @@ PyObject *solve(PyObject *, PyObject *args) {
   // XXX: generalize t, i, n type here
   dataset.initData(
       SolveIter<std::int64_t, std::int64_t, std::int64_t>(t, i, x, n, xsz), sz);
+  /*
   for (const Dataset::Entry &e : dataset.entries) {
     std::cout << "t: " << e.t << std::endl;
     std::cout << "x: ";
@@ -196,12 +197,13 @@ PyObject *solve(PyObject *, PyObject *args) {
     }
     std::cout << std::endl << std::endl;
   }
+  */
 
   typedef CPPAD_TESTVECTOR(double) Dvector;
   std::size_t betasz = isz * xsz;
   Dvector bi(betasz), bl(betasz), bu(betasz);
-  std::memset(&bi[0], 0, sizeof(double) * betasz);
-  for (long ii = xsz; ii--;) {
+  for (long ii = betasz; ii--;) {
+    bi[ii] = 0;
     bl[ii] = -1e19;
     bu[ii] = 1e19;
   }
