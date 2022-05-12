@@ -25,3 +25,18 @@ res = logitthing.solve("Integer print_level 0\nInteger max_iter 10\nString deriv
 print("logitthing.solve:")
 print(res)
 
+
+print("With repeating observations:")
+rng = np.random.default_rng(1)
+nrep = rng.integers(low=50, high=150, size=X.shape[0])
+model.fit(np.repeat(X, nrep, axis=0), np.repeat(y, nrep, axis=0))
+print("model.coef_:")
+print(model.coef_)
+print("normalized model.coef_:")
+for i in range(1, nc):
+    print(model.coef_[i] - model.coef_[0])
+
+res = logitthing.solve("Integer print_level 0\nInteger max_iter 10\nString derivative_test second-order\n", t, yy, XX, n * np.repeat(nrep, nc))
+print("logitthing.solve:")
+print(res)
+
