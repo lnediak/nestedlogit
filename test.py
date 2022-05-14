@@ -27,7 +27,8 @@ print(res)
 
 
 print("With repeating observations:")
-rng = np.random.default_rng(1)
+# rng = np.random.default_rng(1)
+rng = np.random.Generator(np.random.MT19937(1))
 nrep = rng.integers(low=50, high=150, size=X.shape[0])
 model.fit(np.repeat(X, nrep, axis=0), np.repeat(y, nrep, axis=0))
 print("model.coef_:")

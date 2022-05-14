@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include <cppad/ipopt/solve.hpp>
 
@@ -23,10 +24,10 @@ struct DataEntry {
   int64 t;
   std::unique_ptr<double[]> x; /// x[(i-1)*xsz+k]=(x_it)_k, 1<=i<=isz, 0<=k<xsz
   std::unique_ptr<int64[]> n;  /// n[i]=n_it where 0<=i<=isz
-  std::unique_ptr<bool[]> z;   /// z[i-1]=z_i where 1<=i<=isz
+  std::unique_ptr<bool[]> z;   /// z[i]=z_i where 0<=i<=isz
   DataEntry(int64 isz, int64 xsz)
       : t(0), x(new double[isz * xsz]), n(new int64[isz + 1]),
-        z(new bool[isz]) {}
+        z(new bool[isz + 1]) {}
 };
 template <class Tt, class Ti, class Tn> struct DataReader {
   npy_intp ti, tsz;
@@ -52,7 +53,8 @@ template <class Tt, class Ti, class Tn> struct DataReader {
     if (ti >= tsz) {
       return false;
     }
-    std::memset(out.z.get(), 0, sizeof(bool) * isz);
+    std::memset(out.z.get(), 0, sizeof(bool) * (isz + 1));
+    std::memset(out.n.get(), 0, sizeof(int64) * (isz + 1));
     out.t = *reinterpret_cast<Tt *>(t);
     do {
       int64 ci = *reinterpret_cast<Ti *>(i);
@@ -61,8 +63,8 @@ template <class Tt, class Ti, class Tn> struct DataReader {
         for (int64 in = 0, ix = 0; in < xsz; in++, ix += xs1) {
           out.x[(ci - 1) * xsz + in] = *reinterpret_cast<double *>(x + ix);
         }
-        out.z[ci - 1] = true;
       }
+      out.z[ci] = true;
       out.n[ci] = *reinterpret_cast<Tn *>(n);
       t += ts;
       ti++;
@@ -81,6 +83,99 @@ template <class Tt, class Ti, class Tn> struct DataReader {
   }
 };
 
+template <class T, class T1> struct UtilAdderB {
+  T lnum, den; /// log numerator, denominator
+  int64 nt;    /// total number to take as exponent of denominator
+  int64 nest, *nestSpec;
+  T1 expo;
+  /// u is utility, n is number, i1 is i-1
+  void add(T u, int64 n, int64 i1) {
+    if (nestSpec[i1] != nest) {
+      return;
+    }
+    lnum += n * u / expo;
+    den += CppAD::exp(u / expo);
+    nt += n;
+  }
+};
+
+template <class T, class S> struct NestData {
+  int64 ssz;
+  std::unique_ptr<S[]> sub;
+  int64 *nestSpec; /// nestSpec[i-1] is ind of nest containing class i
+  T expo;
+  NestData(int64 ssz, int64 *nestSpec, T expo)
+      : ssz(ssz), sub(new S[ssz]), nestSpec(nestSpec), expo(expo) {}
+  template <class S> T lmodResult(S d) { return expo * CppAD::log(d.den()); }
+  template <class S> T modResult(S d) { return CppAD::pow(d.den(), expo); }
+};
+template <class T, class S> struct NestDataLast {
+  int64 ssz;
+  std::unique_ptr<S[]> sub;
+  int64 *nestSpec;
+  T expoi;
+  NestDataLast(int64 ssz, int64 *nestSpec, T expoi)
+      : ssz(ssz), sub(new S[ssz]), nestSpec(nestSpec), expoi(expoi) {}
+  template <class S> T lmodResult(S d) { return d.lden() / expoi; }
+  template <class S> T modResult(S d) { return CppAD::exp(lmodResult(d)); }
+};
+template <class T, class S, class NS> struct UtilAdder {
+  NS *ns;
+  int64 nt; /// total number to take as exponent of denominator
+  UtilAdder() : ns(nullptr), nt(0) {}
+  template <class... Args> void init(NS *arg, Args args...) {
+    ns = arg;
+    for (int64 ni = ns.ssz; ni--;) {
+      ns->sub[ni].init(args...);
+    }
+  }
+  void reset() {
+    nt = 0;
+    for (int64 ni = ns.ssz; ni--;) {
+      ns->sub[ni].reset();
+    }
+  }
+  /// u is utility, n is number, i1 is i-1
+  void add(T u, int64 n, int64 i1) {
+    nt += n;
+    ns->sub[ns.nestSpec[i1]].add(u, n, i1);
+  }
+  T den() const {
+    T res = 0;
+    for (int64 ni = ns.ssz; ni--;) {
+      res += ns.modResult(ns->sub[ni]);
+    }
+    return res;
+  }
+  void apply(T &l) const {
+    for (int64 ni = ns.ssz; ni--;) {
+      ns->sub[ni].apply(l);
+      l += ns->sub[ni].nt * ns->lmodResult(sub[ni]);
+    }
+    l -= nt * CppAD::log(den());
+  }
+};
+template <class T> TWrap {
+  T t;
+  int64 nt;
+  void init() {
+    t = 0;
+    nt = 0;
+  }
+  void reset() {
+    t = 0;
+    nt = 0;
+  }
+  void add(T u, int64 n, int64) {
+    t = u;
+    nt = n;
+  }
+  T lden() const { return t; }
+  void apply(T & l) const {}
+};
+template <class T>
+using AdderLv1 = UtilAdder<T, TWrap<T>, NestDataLast<T, TWrap<T>>>;
+
 /// beta[(i-1)*xsz + k] = (beta_i)_k
 template <class Reader> struct FG_eval {
   Reader &r;
@@ -95,7 +190,7 @@ template <class Reader> struct FG_eval {
       double nt = r.out.n[0];
       double lnt = std::lgamma(r.out.n[0] + 1);
       for (long i1 = r.isz; i1--;) {
-        if (!r.out.z[i1]) {
+        if (!r.out.z[i1 + 1]) {
           continue;
         }
         ADd tmp = 0;
@@ -107,7 +202,8 @@ template <class Reader> struct FG_eval {
         nt += r.out.n[i1 + 1];
         lnt += std::lgamma(r.out.n[i1 + 1] + 1);
       }
-      t += std::lgamma(nt + 1) - lnt + tmp1 - nt * CppAD::log1p(tmp2);
+      t +=
+          std::lgamma(nt + 1) - lnt + tmp1 - nt * CppAD::log(r.out.z[0] + tmp2);
     }
     r.reset(); // meh kek
     fg[0] = -t;
