@@ -163,20 +163,24 @@ template <class T> struct UtilAdder {
     }
     if (nestSpec[ni]) {
       setLayers(from + 1 + nestSpec[from]);
+    } else {
+      vals[ni].n += vals[0].n;
     }
   }
+  /// does not include the multinomial distribution constant factor
   void addTo(T &l) {
     setLayers();
     int64 i = 0;
     for (int64 end = nestSpec[i]; ++i <= end;) {
-      l += CppAD::exp(vals[i].v / nestMods[i]);
+      l += nestSpec[nestSpec[0] + 1] ? vals[i].n * vals[i].v / nestMods[i]
+                                     : vals[i].n * vals[i].v;
     }
     while (nestSpec[i]) {
-      for (int64 end = nestSpec[i]; ++i <= end;) {
-        l += CppAD::pow(vals[i].v, nestMods[i] - 1);
+      for (int64 end = i + nestSpec[i]; ++i <= end;) {
+        l += vals[i].n * (nestMods[i] - 1) * CppAD::log(vals[i].v);
       }
     }
-    l -= vals[0].z + vals[i].v;
+    l -= vals[i].n * CppAD::log(vals[0].z + vals[i].v);
   }
 };
 
@@ -194,10 +198,8 @@ template <class Reader, class Adder> struct FG_eval {
       a.clearVals();
       ADd tmp1 = 0;
       ADd tmp2 = 0;
-      double nt = r.out.n[0];
-      double lnt = std::lgamma(r.out.n[0] + 1);
       if (r.out.z[0]) {
-        a.set(0, 0, nt);
+        a.set(0, 0, r.out.n[0]);
       }
       for (int64 i1 = r.isz; i1--;) {
         if (!r.out.z[i1 + 1]) {
@@ -208,10 +210,7 @@ template <class Reader, class Adder> struct FG_eval {
           tmp += r.out.x[i1 * r.xsz + k] * beta[i1 * r.xsz + k];
         }
         a.set(i1 + 1, tmp, r.out.n[i1 + 1]);
-        nt += r.out.n[i1 + 1];
-        lnt += std::lgamma(r.out.n[i1 + 1] + 1);
       }
-      t += std::lgamma(nt + 1) - lnt;
       a.addTo(t);
     }
     r.reset(); // meh kek

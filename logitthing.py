@@ -2,7 +2,6 @@ import numpy as np
 
 import _C_logitthing
 
-# TODO: FIX ALL THESE THINGS
 def _parseNS0(ns, out, sz, lvl, pari):
     if (len(out) <= lvl):
         out.append([0])
@@ -31,7 +30,8 @@ def _parseNS0(ns, out, sz, lvl, pari):
 def _parseNS(ns):
     out = [[0]]
     sz = [1]
-    _parseNS0(ns, out, sz, 0, -1)
+    for sub in ns:
+        _parseNS0(sub, out, sz, 0, -1)
     toret = np.zeros(sz[0] + 1, dtype=np.int64)
     ind = 0
     begi = 0
@@ -71,6 +71,5 @@ def solve(options, ns, t, i, x, n):
     # XXX: "factorize" i
     assert len(i[i < 0]) == 0
     assert len(i[i > nestSpec[0]]) == 0
-    print(nestSpec)
     return _C_logitthing.solve(options, nestSpec, t, i, x, n)
 
