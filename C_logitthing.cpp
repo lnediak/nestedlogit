@@ -104,27 +104,36 @@ template <class T> struct UtilAdder {
   std::unique_ptr<T[]> nestMods; // not all of these are used, but whatever
   UtilAdder(int64 nsz, int64 *nestSpec)
       : nsz(nsz), nestSpec(nestSpec), vals(new PT[nsz]), nestMods(new T[nsz]) {}
-  void setNestMods(T *vars, const int64 from = 0) {
-    if (nestSpec[from + 1 + nestSpec[from]]) {
-      if (from) {
-        for (int64 i = from + 1; i <= nestSpec[from]; i++) {
-          nestMods[i] = vars[i] / vars[nestSpec[i]];
-        }
-      } else {
-        for (int64 i = 1; i <= nestSpec[0]; i++) {
-          nestMods[i] = vars[i];
-        }
-      }
-      setNestMods(vars, from + 1 + nestSpec[from]);
-    } else if (from) {
+  template <class TI>
+  void setNestMods(const TI &vars, int64 voff, const int64 from = 0) {
+    int64 ii = from + 1 + nestSpec[from];
+    if (nestSpec[ii] && from) {
       for (int64 i = from + 1; i <= nestSpec[from]; i++) {
-        nestMods[i] = vars[i];
+        nestMods[i] = vars[i - voff] / vars[nestSpec[i] - voff];
+      }
+    } else if (nestSpec[ii] || from) {
+      for (int64 i = from + 1; i <= nestSpec[from]; i++) {
+        nestMods[i] = vars[nestSpec[i] - voff];
       }
     }
+    if (nestSpec[ii]) {
+      setNestMods(vars, voff + 1, from + 1 + nestSpec[from]);
+    }
   }
+  int64 varsDepth() const {
+    int64 toret = 0;
+    int64 i = 1;
+    while (i != nestSpec[i]) {
+      i = nestSpec[i];
+      toret++;
+    }
+    return toret;
+  }
+  int64 varsLen() const { return nsz - nestSpec[0] - 2 - varsDepth(); }
+
   void clearVals() {
     for (int64 i = nsz; i--;) {
-      vals[i].v = vals[i].z = vals[i].n = 0;
+      vals[i].v = vals[i].n = vals[i].z = 0;
     }
   }
   /// i is class, u is utility, n is number
@@ -134,97 +143,158 @@ template <class T> struct UtilAdder {
     vals[i].z = true;
   }
   void setLayers(int64 from = 0) {
-    int64 ii = from + 1 + nestSpec[from];
+    int64 ni = from + 1 + nestSpec[from];
     for (int64 i = from + 1, end = from + nestSpec[from]; i <= end; i++) {
       if (!vals[i].z) {
         continue;
       }
-      int64 ii = nextSpec[ii] ? nextSpec[i] : ii;
+      int64 ii = nestSpec[ni] ? nestSpec[i] : ni;
+      T tmp;
+      if (from) {
+        tmp = CppAD::pow(vals[i].v, nestMods[i]);
+      } else if (nestSpec[ii]) {
+        tmp = CppAD::exp(vals[i].v / nestMods[i]);
+      } else {
+        tmp = CppAD::exp(vals[i].v);
+      }
+      vals[ii].v = vals[ii].z ? vals[ii].v + tmp : tmp;
       vals[ii].z = true;
       vals[ii].n += vals[i].n;
-      if (from) {
-        vals[ii].v += CppAD::pow(vals[i].v, nestMods[i]);
-      } else if (nextSpec[ii]) {
-        vals[ii].v += CppAD::exp(vals[i].v / nestMods[i]);
-      } else {
-        vals[ii].v += CppAD::exp(vals[i].v);
-      }
     }
-    if (nextSpec[ii]) {
+    if (nestSpec[ni]) {
       setLayers(from + 1 + nestSpec[from]);
     }
   }
-  void addTo(T &l) const {
+  void addTo(T &l) {
     setLayers();
-    // TODO: CONTINUE HERE
+    int64 i = 0;
+    for (int64 end = nestSpec[i]; ++i <= end;) {
+      l += CppAD::exp(vals[i].v / nestMods[i]);
+    }
+    while (nestSpec[i]) {
+      for (int64 end = nestSpec[i]; ++i <= end;) {
+        l += CppAD::pow(vals[i].v, nestMods[i] - 1);
+      }
+    }
+    l -= vals[0].z + vals[i].v;
   }
 };
 
 /// beta[(i-1)*xsz + k] = (beta_i)_k
-template <class Reader> struct FG_eval {
+template <class Reader, class Adder> struct FG_eval {
   Reader &r;
+  Adder &a;
   typedef CPPAD_TESTVECTOR(ADd) ADvector;
   void operator()(ADvector &fg, const ADvector &beta) const {
     assert(fg.size() == 1);
-    assert(beta.size() == r.isz * r.xsz);
+    assert(beta.size() == r.isz * r.xsz + a.varsLen());
+    a.setNestMods(beta, r.isz + 2 - r.isz * r.xsz);
     ADd t = 0;
     while (r.next()) {
+      a.clearVals();
       ADd tmp1 = 0;
       ADd tmp2 = 0;
       double nt = r.out.n[0];
       double lnt = std::lgamma(r.out.n[0] + 1);
-      for (long i1 = r.isz; i1--;) {
+      if (r.out.z[0]) {
+        a.set(0, 0, nt);
+      }
+      for (int64 i1 = r.isz; i1--;) {
         if (!r.out.z[i1 + 1]) {
           continue;
         }
-        ADd tmp = 0;
-        for (long k = r.xsz; k--;) {
+        ADd tmp = r.out.x[i1 * r.xsz] * beta[i1 * r.xsz];
+        for (int64 k = r.xsz; --k;) {
           tmp += r.out.x[i1 * r.xsz + k] * beta[i1 * r.xsz + k];
         }
-        tmp1 += r.out.n[i1 + 1] * tmp;
-        tmp2 += CppAD::exp(tmp);
+        a.set(i1 + 1, tmp, r.out.n[i1 + 1]);
         nt += r.out.n[i1 + 1];
         lnt += std::lgamma(r.out.n[i1 + 1] + 1);
       }
-      t +=
-          std::lgamma(nt + 1) - lnt + tmp1 - nt * CppAD::log(r.out.z[0] + tmp2);
+      t += std::lgamma(nt + 1) - lnt;
+      a.addTo(t);
     }
     r.reset(); // meh kek
     fg[0] = -t;
   }
 };
 
+std::unique_ptr<int64[]> copyNpArr(PyArrayObject *a, npy_intp &len) {
+  len = PyArray_DIM(a, 0);
+  std::unique_ptr<int64[]> toret(new int64[len]);
+  npy_intp sd = PyArray_STRIDE(a, 0);
+  char *ptr = static_cast<char *>(PyArray_DATA(a));
+  for (npy_intp i = 0; i < len; i++, ptr += sd) {
+    // XXX: generalize type here
+    toret[i] = *reinterpret_cast<int64 *>(ptr);
+  }
+  return toret;
+}
+
 PyObject *solve(PyObject *, PyObject *args) {
   const char *options;
-  long isz;
-  PyArrayObject *t, *i, *x, *n;
-  if (!PyArg_ParseTuple(args, "slOOOO", &options, &isz, &t, &i, &x, &n)) {
+  PyArrayObject *ns, *t, *i, *x, *n;
+  if (!PyArg_ParseTuple(args, "sOOOOO", &options, &ns, &t, &i, &x, &n)) {
+    PyErr_SetString(PyExc_ValueError, "parsing arguments went wrong?");
     return NULL;
   }
-  if (!t || !i || !x || !n) {
+  if (!ns || !t || !i || !x || !n) {
+    PyErr_SetString(PyExc_ValueError, "something happened to the np arrays");
     return NULL;
   }
-  long xsz = PyArray_DIM(x, 1);
+  npy_intp nsz;
+  std::unique_ptr<int64[]> nestSpec = copyNpArr(ns, nsz);
+  int64 isz = nestSpec[0];
+  int64 xsz = PyArray_DIM(x, 1);
   // XXX: generalize t, i, n type here
   DataReader<int64, int64, int64> dataReader(t, i, x, n, isz, xsz);
+  UtilAdder<ADd> utilAdder(nsz, nestSpec.get());
   typedef CPPAD_TESTVECTOR(double) Dvector;
-  std::size_t betasz = isz * xsz;
+  std::size_t betasz = isz * xsz + utilAdder.varsLen();
   Dvector bi(betasz), bl(betasz), bu(betasz);
-  for (long ii = betasz; ii--;) {
+  for (std::size_t ii = isz * xsz; ii--;) {
     bi[ii] = 0;
     bl[ii] = -1e19;
     bu[ii] = 1e19;
   }
+  // XXX: add option for these
+  for (std::size_t ii = isz * xsz; ii < betasz; ii++) {
+    bi[ii] = bl[ii] = 0;
+    bu[ii] = 1;
+  }
   CppAD::ipopt::solve_result<Dvector> solution;
-  FG_eval<decltype(dataReader)> fg_eval{dataReader};
+  FG_eval<decltype(dataReader), decltype(utilAdder)> fg_eval{dataReader,
+                                                             utilAdder};
   CppAD::ipopt::solve<Dvector, decltype(fg_eval)>(std::string(options), bi, bl,
                                                   bu, Dvector(0), Dvector(0),
                                                   fg_eval, solution);
   assert(solution.status == decltype(solution)::success);
   npy_intp tmp[2] = {isz, xsz};
-  PyObject *ret = PyArray_ZEROS(2, tmp, NPY_DOUBLE, 0);
-  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(ret)),
-              &solution.x[0], sizeof(double) * betasz);
+  PyObject *par = PyArray_ZEROS(2, tmp, NPY_DOUBLE, 0);
+  if (!par) {
+    PyErr_SetString(PyExc_RuntimeError, "failed to create a new np array");
+    return NULL;
+  }
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(par)),
+              &solution.x[0], sizeof(double) * isz * xsz);
+  PyObject *ret = PyTuple_New(1 + utilAdder.varsDepth());
+  if (!ret) {
+    PyErr_SetString(PyExc_RuntimeError, "failed to create a new tuple");
+    return NULL;
+  }
+  PyTuple_SetItem(ret, 0, par);
+  int64 soli = isz * xsz;
+  for (int64 i = isz + 1, ri = 1; nestSpec[i];
+       i += 1 + nestSpec[i], soli += nestSpec[i], ri++) {
+    PyObject *var = PyArray_ZEROS(1, &nestSpec[i], NPY_DOUBLE, 0);
+    if (!var) {
+      PyErr_SetString(PyExc_RuntimeError, "failed to create a new np array");
+      return NULL;
+    }
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(par)),
+                &solution.x[soli], sizeof(double) * nestSpec[i]);
+    PyTuple_SetItem(ret, ri, var);
+  }
   return ret;
 }
 

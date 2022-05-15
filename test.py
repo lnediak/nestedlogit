@@ -21,7 +21,7 @@ XX = np.repeat(X, nc, axis=0)
 t = np.repeat(np.arange(len(y)), nc)
 ytmp = np.repeat(y, nc)
 n = np.array(yy == ytmp, dtype='int64')
-res = logitthing.solve("Integer print_level 0\nInteger max_iter 10\nString derivative_test second-order\n", t, yy, XX, n)
+res = logitthing.solve("Integer print_level 0\nInteger max_iter 10\nString derivative_test second-order\n", list(range(1, nc + 1)), t, yy, XX, n)
 print("logitthing.solve:")
 print(res)
 
@@ -37,7 +37,7 @@ print("normalized model.coef_:")
 for i in range(1, nc):
     print(model.coef_[i] - model.coef_[0])
 
-res = logitthing.solve("Integer print_level 0\nInteger max_iter 10\nString derivative_test second-order\n", t, yy, XX, n * np.repeat(nrep, nc))
+res = logitthing.solve("Integer print_level 0\nInteger max_iter 10\nString derivative_test second-order\n", list(range(1, nc + 1)), t, yy, XX, n * np.repeat(nrep, nc))
 print("logitthing.solve:")
 print(res)
 
