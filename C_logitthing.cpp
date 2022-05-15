@@ -83,98 +83,82 @@ template <class Tt, class Ti, class Tn> struct DataReader {
   }
 };
 
-template <class T, class T1> struct UtilAdderB {
-  T lnum, den; /// log numerator, denominator
-  int64 nt;    /// total number to take as exponent of denominator
-  int64 nest, *nestSpec;
-  T1 expo;
-  /// u is utility, n is number, i1 is i-1
-  void add(T u, int64 n, int64 i1) {
-    if (nestSpec[i1] != nest) {
-      return;
-    }
-    lnum += n * u / expo;
-    den += CppAD::exp(u / expo);
-    nt += n;
-  }
-};
-
-template <class T, class S> struct NestData {
-  int64 ssz;
-  std::unique_ptr<S[]> sub;
-  int64 *nestSpec; /// nestSpec[i-1] is ind of nest containing class i
-  T expo;
-  NestData(int64 ssz, int64 *nestSpec, T expo)
-      : ssz(ssz), sub(new S[ssz]), nestSpec(nestSpec), expo(expo) {}
-  template <class S> T lmodResult(S d) { return expo * CppAD::log(d.den()); }
-  template <class S> T modResult(S d) { return CppAD::pow(d.den(), expo); }
-};
-template <class T, class S> struct NestDataLast {
-  int64 ssz;
-  std::unique_ptr<S[]> sub;
+/**
+  nestSpec[0] is isz
+  nestSpec[1..isz] will give an index, in nestSpec of the nest class i is in
+  nestSpec[isz+1] is the number of nests
+  nestSpec[j] will give an index, in nestSpec of the nest that nest j is in
+  etc...
+  nestSpec[j] == j says that j is on the highest level of nesting,
+  nestSpec[nsz - 1] = 0
+*/
+template <class T> struct UtilAdder {
+  struct PT {
+    T v;
+    int64 n;
+    bool z = false;
+  };
+  int64 nsz;
   int64 *nestSpec;
-  T expoi;
-  NestDataLast(int64 ssz, int64 *nestSpec, T expoi)
-      : ssz(ssz), sub(new S[ssz]), nestSpec(nestSpec), expoi(expoi) {}
-  template <class S> T lmodResult(S d) { return d.lden() / expoi; }
-  template <class S> T modResult(S d) { return CppAD::exp(lmodResult(d)); }
+  std::unique_ptr<PT[]> vals;    // vals[0..isz] is log, vals[nsz-1] is special
+  std::unique_ptr<T[]> nestMods; // not all of these are used, but whatever
+  UtilAdder(int64 nsz, int64 *nestSpec)
+      : nsz(nsz), nestSpec(nestSpec), vals(new PT[nsz]), nestMods(new T[nsz]) {}
+  void setNestMods(T *vars, const int64 from = 0) {
+    if (nestSpec[from + 1 + nestSpec[from]]) {
+      if (from) {
+        for (int64 i = from + 1; i <= nestSpec[from]; i++) {
+          nestMods[i] = vars[i] / vars[nestSpec[i]];
+        }
+      } else {
+        for (int64 i = 1; i <= nestSpec[0]; i++) {
+          nestMods[i] = vars[i];
+        }
+      }
+      setNestMods(vars, from + 1 + nestSpec[from]);
+    } else if (from) {
+      for (int64 i = from + 1; i <= nestSpec[from]; i++) {
+        nestMods[i] = vars[i];
+      }
+    }
+  }
+  void clearVals() {
+    for (int64 i = nsz; i--;) {
+      vals[i].v = vals[i].z = vals[i].n = 0;
+    }
+  }
+  /// i is class, u is utility, n is number
+  void set(int64 i, T u, int64 n) {
+    vals[i].v = u;
+    vals[i].n = n;
+    vals[i].z = true;
+  }
+  void setLayers(int64 from = 0) {
+    int64 ii = from + 1 + nestSpec[from];
+    for (int64 i = from + 1, end = from + nestSpec[from]; i <= end; i++) {
+      if (!vals[i].z) {
+        continue;
+      }
+      int64 ii = nextSpec[ii] ? nextSpec[i] : ii;
+      vals[ii].z = true;
+      vals[ii].n += vals[i].n;
+      if (from) {
+        vals[ii].v += CppAD::pow(vals[i].v, nestMods[i]);
+      } else if (nextSpec[ii]) {
+        vals[ii].v += CppAD::exp(vals[i].v / nestMods[i]);
+      } else {
+        vals[ii].v += CppAD::exp(vals[i].v);
+      }
+    }
+    if (nextSpec[ii]) {
+      setLayers(from + 1 + nestSpec[from]);
+    }
+  }
+  void addTo(T &l) const {
+    setLayers();
+    // TODO: CONTINUE HERE
+  }
 };
-template <class T, class S, class NS> struct UtilAdder {
-  NS *ns;
-  int64 nt; /// total number to take as exponent of denominator
-  UtilAdder() : ns(nullptr), nt(0) {}
-  template <class... Args> void init(NS *arg, Args args...) {
-    ns = arg;
-    for (int64 ni = ns.ssz; ni--;) {
-      ns->sub[ni].init(args...);
-    }
-  }
-  void reset() {
-    nt = 0;
-    for (int64 ni = ns.ssz; ni--;) {
-      ns->sub[ni].reset();
-    }
-  }
-  /// u is utility, n is number, i1 is i-1
-  void add(T u, int64 n, int64 i1) {
-    nt += n;
-    ns->sub[ns.nestSpec[i1]].add(u, n, i1);
-  }
-  T den() const {
-    T res = 0;
-    for (int64 ni = ns.ssz; ni--;) {
-      res += ns.modResult(ns->sub[ni]);
-    }
-    return res;
-  }
-  void apply(T &l) const {
-    for (int64 ni = ns.ssz; ni--;) {
-      ns->sub[ni].apply(l);
-      l += ns->sub[ni].nt * ns->lmodResult(sub[ni]);
-    }
-    l -= nt * CppAD::log(den());
-  }
-};
-template <class T> TWrap {
-  T t;
-  int64 nt;
-  void init() {
-    t = 0;
-    nt = 0;
-  }
-  void reset() {
-    t = 0;
-    nt = 0;
-  }
-  void add(T u, int64 n, int64) {
-    t = u;
-    nt = n;
-  }
-  T lden() const { return t; }
-  void apply(T & l) const {}
-};
-template <class T>
-using AdderLv1 = UtilAdder<T, TWrap<T>, NestDataLast<T, TWrap<T>>>;
 
 /// beta[(i-1)*xsz + k] = (beta_i)_k
 template <class Reader> struct FG_eval {
