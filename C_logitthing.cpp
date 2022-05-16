@@ -2,6 +2,7 @@
 #include <Python.h>
 
 #include <numpy/arrayobject.h>
+#include <numpy/random/distributions.h>
 
 #include <cassert>
 #include <cmath>
@@ -31,7 +32,7 @@ struct DataEntry {
 };
 template <class Tt, class Ti, class Tn> struct DataReader {
   npy_intp ti, tsz;
-  char *t, *i, *x, *n;
+  char *t, *i, *x, *n, *norig;
   npy_intp ts, is, xs0, xs1, ns;
   int64 isz, xsz;
   DataEntry out;
@@ -46,16 +47,18 @@ template <class Tt, class Ti, class Tn> struct DataReader {
     x = static_cast<char *>(PyArray_DATA(xa));
     xs0 = PyArray_STRIDE(xa, 0);
     xs1 = PyArray_STRIDE(xa, 1);
-    n = static_cast<char *>(PyArray_DATA(na));
+    norig = n = static_cast<char *>(PyArray_DATA(na));
     ns = PyArray_STRIDE(na, 0);
   }
-  bool next() {
+  /// readN means just reading, !readN means using for generateData
+  template <bool readN> bool next() {
     if (ti >= tsz) {
       return false;
     }
     std::memset(out.z.get(), 0, sizeof(bool) * (isz + 1));
     std::memset(out.n.get(), 0, sizeof(int64) * (isz + 1));
     out.t = *reinterpret_cast<Tt *>(t);
+    Tt nt = 0;
     do {
       int64 ci = *reinterpret_cast<Ti *>(i);
       assert(0 <= ci && ci <= isz);
@@ -65,13 +68,21 @@ template <class Tt, class Ti, class Tn> struct DataReader {
         }
       }
       out.z[ci] = true;
-      out.n[ci] = *reinterpret_cast<Tn *>(n);
+      if (readN) {
+        out.n[ci] = *reinterpret_cast<Tn *>(n);
+      } else {
+        out.n[ci] = n - norig;
+        nt += *reinterpret_cast<Tn *>(n);
+      }
       t += ts;
       ti++;
       i += is;
       x += xs0;
       n += ns;
     } while (ti < tsz && *reinterpret_cast<Tt *>(t) == out.t);
+    if (!readN) {
+      out.t = nt; // stealing the otherwise useless field...
+    }
     return true;
   }
   void reset() {
@@ -167,9 +178,8 @@ template <class T> struct UtilAdder {
       vals[ni].n += vals[0].n;
     }
   }
-  /// does not include the multinomial distribution constant factor
-  void addTo(T &l) {
-    setLayers();
+  /// call setLayers first, does not include the multinomial constant factor
+  void addTo(T &l) const {
     int64 i = 0;
     for (int64 end = nestSpec[i]; ++i <= end;) {
       l += nestSpec[nestSpec[0] + 1] ? vals[i].n * vals[i].v / nestMods[i]
@@ -181,6 +191,15 @@ template <class T> struct UtilAdder {
       }
     }
     l -= vals[i].n * CppAD::log(vals[0].z + vals[i].v);
+  }
+  /// call setLayers first, given values passed to set, get prob of class i
+  T getProb(int64 i) const {
+    T res = CppAD::exp(i == nestSpec[i] ? vals[i].v : vals[i].n / nestMods[i]);
+    while (i != nestSpec[i]) {
+      i = nestSpec[i];
+      res *= CppAD::pow(vals[i].v, nestMods[i] - 1);
+    }
+    return res / (vals[0].z + vals[nsz - 1].v);
   }
 };
 
@@ -194,10 +213,8 @@ template <class Reader, class Adder> struct FG_eval {
     assert(beta.size() == r.isz * r.xsz + a.varsLen());
     a.setNestMods(beta, r.isz + 2 - r.isz * r.xsz);
     ADd t = 0;
-    while (r.next()) {
+    while (r.next<true>()) {
       a.clearVals();
-      ADd tmp1 = 0;
-      ADd tmp2 = 0;
       if (r.out.z[0]) {
         a.set(0, 0, r.out.n[0]);
       }
@@ -211,10 +228,54 @@ template <class Reader, class Adder> struct FG_eval {
         }
         a.set(i1 + 1, tmp, r.out.n[i1 + 1]);
       }
+      a.setLayers();
       a.addTo(t);
     }
     r.reset(); // meh kek
     fg[0] = -t;
+  }
+  // I am using r.out.t for the total `n` for that observation
+  // while using r.out.n[i] as pointer offset for r.norig
+  template <class Dvec>
+  void generateData(const Dvec &beta, bitgen_t *bitgen_state) const {
+    assert(beta.size() == r.isz * r.xsz + a.varsLen());
+    a.setNestMods(beta, r.isz + 2 - r.isz * r.xsz);
+    // as passed to random_multinomial:
+    npy_intp d = r.isz + 1;
+    std::unique_ptr<npy_int64[]> mnix(new npy_int64[d]);
+    std::unique_ptr<double[]> pix(new double[d]);
+    binomial_t binomial;
+    while (r.next<false>()) {
+      a.clearVals();
+      if (r.out.z[0]) {
+        a.set(0, 0, 0);
+      }
+      for (int64 i1 = r.isz; i1--;) {
+        if (!r.out.z[i1 + 1]) {
+          continue;
+        }
+        ADd tmp = r.out.x[i1 * r.xsz] * beta[i1 * r.xsz];
+        for (int64 k = r.xsz; --k;) {
+          tmp += r.out.x[i1 * r.xsz + k] * beta[i1 * r.xsz + k];
+        }
+        a.set(i1 + 1, tmp, 0);
+      }
+      a.setLayers();
+      // lazy me
+      std::memset(pix.get(), 0, sizeof(double) * d);
+      for (int64 i = r.isz + 1; i--;) {
+        if (r.out.z[i]) {
+          pix[i] = a.getProb(i);
+        }
+      }
+      random_multinomial(bitgen_state, r.out.t, mnix.get(), pix.get(), d,
+                         &binomial);
+      for (int64 i = r.isz + 1; i--;) {
+        if (r.out.z[i]) {
+          *reinterpret_cast<npy_int64 *>(r.norig + r.out.n[i]) = mnix[i];
+        }
+      }
+    }
   }
 };
 
@@ -225,9 +286,46 @@ std::unique_ptr<int64[]> copyNpArr(PyArrayObject *a, npy_intp &len) {
   char *ptr = static_cast<char *>(PyArray_DATA(a));
   for (npy_intp i = 0; i < len; i++, ptr += sd) {
     // XXX: generalize type here
-    toret[i] = *reinterpret_cast<int64 *>(ptr);
+    toret[i] = *reinterpret_cast<npy_int64 *>(ptr);
   }
   return toret;
+}
+std::vector<double> copyNpDArr(PyArrayObject *a) {
+  std::size_t len = PyArray_DIM(a, 0);
+  std::vector<double> toret(new double[len]);
+  npy_intp sd = PyArray_STRIDE(a, 0);
+  char *ptr = static_cast<char *>(PyArray_DATA(a));
+  for (npy_intp i = 0; i < len; i++, ptr += sd) {
+    toret[i] = *reinterpret_cast<double *>(ptr);
+  }
+  return toret;
+}
+
+PyObject *genData(PyObject *, PyObject *args) {
+  PyObject *btgen;
+  PyArrayObject *betaarr, *ns, *t, *i, *x, *n;
+  if (!PyArg_ParseTuple(args, "OOOOOOOO", &btgen, &betaarr, &ns, &t, &i, &x,
+                        &n)) {
+    PyErr_SetString(PyExc_ValueError, "parsing arguments went wrong?");
+    return NULL;
+  }
+  if (!btgen || !ns || !t || !i || !x || !n) {
+    PyErr_SetString(PyExc_ValueError, "something happened to the parsed vals");
+    return NULL;
+  }
+  bitgen_t *bitgen_state = PyCapsule_GetPointer(btgen, "BitGenerator");
+  std::vector<double> beta = copyNpDArr(betaarr);
+  npy_intp nsz;
+  std::unique_ptr<int64[]> nestSpec = copyNpArr(ns, nsz);
+  int64 isz = nestSpec[0];
+  int64 xsz = PyArray_DIM(x, 1);
+  // XXX: generalize t, i, n type here
+  DataReader<npy_int64, npy_int64, npy_int64> dataReader(t, i, x, n, isz, xsz);
+  UtilAdder<ADd> utilAdder(nsz, nestSpec.get());
+  FG_eval<decltype(dataReader), decltype(utilAdder)> fg_eval{dataReader,
+                                                             utilAdder};
+  fg_eval.generateData(beta, bitgen_state);
+  return Py_BuildValue(""); // return None
 }
 
 PyObject *solve(PyObject *, PyObject *args) {
@@ -246,7 +344,7 @@ PyObject *solve(PyObject *, PyObject *args) {
   int64 isz = nestSpec[0];
   int64 xsz = PyArray_DIM(x, 1);
   // XXX: generalize t, i, n type here
-  DataReader<int64, int64, int64> dataReader(t, i, x, n, isz, xsz);
+  DataReader<npy_int64, npy_int64, npy_int64> dataReader(t, i, x, n, isz, xsz);
   UtilAdder<ADd> utilAdder(nsz, nestSpec.get());
   typedef CPPAD_TESTVECTOR(double) Dvector;
   std::size_t betasz = isz * xsz + utilAdder.varsLen();
@@ -298,7 +396,9 @@ PyObject *solve(PyObject *, PyObject *args) {
 }
 
 PyMethodDef C_logitthingMethods[] = {
-    {"solve", solve, METH_VARARGS, "who cares about docstring"}, {0, 0, 0, 0}};
+    {"solve", solve, METH_VARARGS, "who cares about docstring"},
+    {"genData", genData, METH_VARARGS, "docstings are a pain"},
+    {0, 0, 0, 0}};
 
 PyModuleDef C_logitthingModule = {PyModuleDef_HEAD_INIT, "_C_logitthing", NULL,
                                   -1, C_logitthingMethods};
