@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include <cppad/ipopt/solve.hpp>
@@ -30,7 +31,8 @@ struct DataEntry {
       : t(0), x(new double[isz * xsz]), n(new int64[isz + 1]),
         z(new bool[isz + 1]) {}
 };
-template <class Tt, class Ti, class Tn> struct DataReader {
+/// readN means just reading, !readN means using for generateData
+template <class Tt, class Ti, class Tn, bool readN> struct DataReader {
   npy_intp ti, tsz;
   char *t, *i, *x, *n, *norig;
   npy_intp ts, is, xs0, xs1, ns;
@@ -50,8 +52,7 @@ template <class Tt, class Ti, class Tn> struct DataReader {
     norig = n = static_cast<char *>(PyArray_DATA(na));
     ns = PyArray_STRIDE(na, 0);
   }
-  /// readN means just reading, !readN means using for generateData
-  template <bool readN> bool next() {
+  bool next() {
     if (ti >= tsz) {
       return false;
     }
@@ -104,6 +105,7 @@ template <class Tt, class Ti, class Tn> struct DataReader {
   nestSpec[nsz - 1] = 0
 */
 template <class T> struct UtilAdder {
+  typedef T value_type;
   struct PT {
     T v;
     int64 n;
@@ -207,13 +209,16 @@ template <class T> struct UtilAdder {
 template <class Reader, class Adder> struct FG_eval {
   Reader &r;
   Adder &a;
+  typedef typename std::remove_cv<
+      typename std::remove_reference<Adder>::type>::type::value_type value_type;
   typedef CPPAD_TESTVECTOR(ADd) ADvector;
   void operator()(ADvector &fg, const ADvector &beta) const {
     assert(fg.size() == 1);
     assert(beta.size() == r.isz * r.xsz + a.varsLen());
     a.setNestMods(beta, r.isz + 2 - r.isz * r.xsz);
     ADd t = 0;
-    while (r.next<true>()) {
+    // expecting readN on r
+    while (r.next()) {
       a.clearVals();
       if (r.out.z[0]) {
         a.set(0, 0, r.out.n[0]);
@@ -222,7 +227,7 @@ template <class Reader, class Adder> struct FG_eval {
         if (!r.out.z[i1 + 1]) {
           continue;
         }
-        ADd tmp = r.out.x[i1 * r.xsz] * beta[i1 * r.xsz];
+        value_type tmp = r.out.x[i1 * r.xsz] * beta[i1 * r.xsz];
         for (int64 k = r.xsz; --k;) {
           tmp += r.out.x[i1 * r.xsz + k] * beta[i1 * r.xsz + k];
         }
@@ -245,7 +250,8 @@ template <class Reader, class Adder> struct FG_eval {
     std::unique_ptr<npy_int64[]> mnix(new npy_int64[d]);
     std::unique_ptr<double[]> pix(new double[d]);
     binomial_t binomial;
-    while (r.next<false>()) {
+    // expecting !readN on r
+    while (r.next()) {
       a.clearVals();
       if (r.out.z[0]) {
         a.set(0, 0, 0);
@@ -254,7 +260,7 @@ template <class Reader, class Adder> struct FG_eval {
         if (!r.out.z[i1 + 1]) {
           continue;
         }
-        ADd tmp = r.out.x[i1 * r.xsz] * beta[i1 * r.xsz];
+        value_type tmp = r.out.x[i1 * r.xsz] * beta[i1 * r.xsz];
         for (int64 k = r.xsz; --k;) {
           tmp += r.out.x[i1 * r.xsz + k] * beta[i1 * r.xsz + k];
         }
@@ -292,10 +298,10 @@ std::unique_ptr<int64[]> copyNpArr(PyArrayObject *a, npy_intp &len) {
 }
 std::vector<double> copyNpDArr(PyArrayObject *a) {
   std::size_t len = PyArray_DIM(a, 0);
-  std::vector<double> toret(new double[len]);
+  std::vector<double> toret(len);
   npy_intp sd = PyArray_STRIDE(a, 0);
   char *ptr = static_cast<char *>(PyArray_DATA(a));
-  for (npy_intp i = 0; i < len; i++, ptr += sd) {
+  for (std::size_t i = 0; i < len; i++, ptr += sd) {
     toret[i] = *reinterpret_cast<double *>(ptr);
   }
   return toret;
@@ -313,15 +319,17 @@ PyObject *genData(PyObject *, PyObject *args) {
     PyErr_SetString(PyExc_ValueError, "something happened to the parsed vals");
     return NULL;
   }
-  bitgen_t *bitgen_state = PyCapsule_GetPointer(btgen, "BitGenerator");
+  bitgen_t *bitgen_state =
+      static_cast<bitgen_t *>(PyCapsule_GetPointer(btgen, "BitGenerator"));
   std::vector<double> beta = copyNpDArr(betaarr);
   npy_intp nsz;
   std::unique_ptr<int64[]> nestSpec = copyNpArr(ns, nsz);
   int64 isz = nestSpec[0];
   int64 xsz = PyArray_DIM(x, 1);
   // XXX: generalize t, i, n type here
-  DataReader<npy_int64, npy_int64, npy_int64> dataReader(t, i, x, n, isz, xsz);
-  UtilAdder<ADd> utilAdder(nsz, nestSpec.get());
+  DataReader<npy_int64, npy_int64, npy_int64, false> dataReader(t, i, x, n, isz,
+                                                                xsz);
+  UtilAdder<double> utilAdder(nsz, nestSpec.get());
   FG_eval<decltype(dataReader), decltype(utilAdder)> fg_eval{dataReader,
                                                              utilAdder};
   fg_eval.generateData(beta, bitgen_state);
@@ -344,7 +352,8 @@ PyObject *solve(PyObject *, PyObject *args) {
   int64 isz = nestSpec[0];
   int64 xsz = PyArray_DIM(x, 1);
   // XXX: generalize t, i, n type here
-  DataReader<npy_int64, npy_int64, npy_int64> dataReader(t, i, x, n, isz, xsz);
+  DataReader<npy_int64, npy_int64, npy_int64, true> dataReader(t, i, x, n, isz,
+                                                               xsz);
   UtilAdder<ADd> utilAdder(nsz, nestSpec.get());
   typedef CPPAD_TESTVECTOR(double) Dvector;
   std::size_t betasz = isz * xsz + utilAdder.varsLen();
@@ -409,4 +418,3 @@ PyMODINIT_FUNC PyInit__C_logitthing() {
   import_array();
   return PyModule_Create(&C_logitthingModule);
 }
-
