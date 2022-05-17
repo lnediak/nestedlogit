@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -404,9 +405,123 @@ PyObject *solve(PyObject *, PyObject *args) {
   return ret;
 }
 
+// -- tests?
+
+void slowWriteProbs3L(const int64 *nestSpec, const bool *z, const double *u,
+                      const double *in, const double *ou, double *p) {
+  int64 isz = nestSpec[0];
+  int64 insz = nestSpec[isz + 1];
+  int64 ousz = nestSpec[isz + insz + 2];
+  for (int64 i = 0; i <= isz; i++) {
+    if (!z[i]) {
+      continue;
+    }
+    int64 innest = nestSpec[i] - isz - 2;
+    int64 ounest = nestSpec[nestSpec[i]] - isz - insz - 3;
+    if (i) {
+      p[i] = std::exp(u[i] / in[innest]);
+    } else {
+      p[i] = 1;
+    }
+    double tmp = 0;
+    for (int64 j = 1; j <= isz; j++) {
+      if (nestSpec[j] == nestSpec[i]) {
+        tmp += std::exp(u[j] / in[innest]);
+      }
+    }
+    p[i] *= std::pow(tmp, in[innest] / ou[ounest] - 1);
+    tmp = 0;
+    for (int64 k = isz + 2; k < isz + insz + 2; k++) {
+      if (nestSpec[k] == nestSpec[nestSpec[i]]) {
+        double itmp = 0;
+        for (int64 j = 1; j <= isz; j++) {
+          if (nestSpec[j] == k) {
+            itmp += std::exp(u[j] / in[k - isz - 2]);
+          }
+        }
+        tmp += std::pow(itmp, in[k - isz - 2] / ou[ounest]);
+      }
+    }
+    p[i] *= std::pow(tmp, ou[ounest] - 1);
+    tmp = z[0];
+    for (int64 l = isz + insz + 3; l < isz + insz + ousz + 3; l++) {
+      double otmp = 0;
+      for (int64 k = isz + 2; k < isz + insz + 2; k++) {
+        if (nestSpec[k] == l) {
+          double itmp = 0;
+          for (int64 j = 1; j <= isz; j++) {
+            if (nestSpec[j] == k) {
+              itmp += std::exp(u[j] / in[k - isz - 2]);
+            }
+          }
+          otmp += std::pow(itmp, in[k - isz - 2] / ou[ounest]);
+        }
+      }
+      tmp += std::pow(otmp, ou[l - isz - insz - 3]);
+    }
+    p[i] /= tmp;
+  }
+}
+
+PyObject *runTests(PyObject *, PyObject *) {
+  int64 nestSpec[] = {10, 14, 14, 14, 15, 16, 16, 16, 12, 13, 13,
+                      5,  19, 19, 18, 18, 18, 2,  18, 19, 0};
+  UtilAdder<double> utilAdder(21, nestSpec);
+  std::uniform_int_distribution<bool> disti(0, 1);
+  std::uniform_int_distribution<double> distr(-10, 10);
+  for (int spam = 0; spam < 1000; spam++) {
+    std::mt19937 mtrand(spam);
+    bool z[] = {disti(mtrand), disti(mtrand), disti(mtrand), disti(mtrand),
+                disti(mtrand), disti(mtrand), disti(mtrand), disti(mtrand),
+                disti(mtrand), disti(mtrand)};
+    bool zpass = false;
+    for (int i = 0; i <= 10; i++) {
+      if (z[i]) {
+        zpass = true;
+      }
+    }
+    if (!zpass) {
+      z[4] = true; // no reason
+    }
+    double u[] = {0,
+                  distr(mtrand),
+                  distr(mtrand),
+                  distr(mtrand),
+                  distr(mtrand),
+                  distr(mtrand),
+                  distr(mtrand),
+                  distr(mtrand),
+                  distr(mtrand),
+                  distr(mtrand),
+                  distr(mtrand)};
+    double vars[] = {distr(mtrand), distr(mtrand), distr(mtrand), distr(mtrand),
+                     distr(mtrand), distr(mtrand), distr(mtrand)};
+    double *in = vars;
+    double *ou = in + 5;
+    double p[10];
+    slowWriteProbs3L(nestSpec, z, u, in, ou, p);
+    utilAdder.setNestMods(vars, 0);
+    utilAdder.clearVals();
+    for (int i = 0; i <= 10; i++) {
+      if (z[i]) {
+        utilAdder.set(i, u[i], 0);
+      }
+    }
+    for (int i = 0; i <= 10; i++) {
+      if (std::abs(utilAdder.getProb(i) - p[i]) >= 1e-5) {
+        return NULL;
+      }
+    }
+  }
+  return Py_BuildValue("");
+}
+
+// -- actual wrapping stuff
+
 PyMethodDef C_logitthingMethods[] = {
     {"solve", solve, METH_VARARGS, "who cares about docstring"},
     {"genData", genData, METH_VARARGS, "docstings are a pain"},
+    {"runTests", runTests, METH_VARARGS, "runs tests?"},
     {0, 0, 0, 0}};
 
 PyModuleDef C_logitthingModule = {PyModuleDef_HEAD_INIT, "_C_logitthing", NULL,
