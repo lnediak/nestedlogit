@@ -1,10 +1,10 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 #include <numpy/random/distributions.h>
 
-#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -17,12 +17,22 @@
 
 #include <cppad/ipopt/solve.hpp>
 
+#define STRINGIFY(s) #s
+#define ASSERT_T(expr)                                                         \
+  if (!(expr)) {                                                               \
+    throw std::runtime_error(STRINGIFY(__FILE__) ":" STRINGIFY(                \
+        __LINE__) ": `" #expr "` not true.");                                  \
+  }
+
+#define PRINT_V(expr) std::cout << #expr ": " << (expr) << std::endl
+
 namespace {
 
 typedef std::int64_t int64;
 
 typedef CppAD::AD<double> ADd;
 
+/// for generateData, t is used as total n, and n gets ptr offs from norig
 struct DataEntry {
   int64 t;
   std::unique_ptr<double[]> x; /// x[(i-1)*xsz+k]=(x_it)_k, 1<=i<=isz, 0<=k<xsz
@@ -58,12 +68,11 @@ template <class Tt, class Ti, class Tn, bool readN> struct DataReader {
       return false;
     }
     std::memset(out.z.get(), 0, sizeof(bool) * (isz + 1));
-    std::memset(out.n.get(), 0, sizeof(int64) * (isz + 1));
     out.t = *reinterpret_cast<Tt *>(t);
     Tt nt = 0;
     do {
       int64 ci = *reinterpret_cast<Ti *>(i);
-      assert(0 <= ci && ci <= isz);
+      ASSERT_T(0 <= ci && ci <= isz);
       if (ci) {
         for (int64 in = 0, ix = 0; in < xsz; in++, ix += xs1) {
           out.x[(ci - 1) * xsz + in] = *reinterpret_cast<double *>(x + ix);
@@ -77,10 +86,10 @@ template <class Tt, class Ti, class Tn, bool readN> struct DataReader {
         nt += *reinterpret_cast<Tn *>(n);
       }
       t += ts;
-      ti++;
       i += is;
       x += xs0;
       n += ns;
+      ti++;
     } while (ti < tsz && *reinterpret_cast<Tt *>(t) == out.t);
     if (!readN) {
       out.t = nt; // stealing the otherwise useless field...
@@ -113,22 +122,37 @@ template <class T> struct UtilAdder {
     bool z = false;
   };
   int64 nsz;
-  int64 *nestSpec;
+  const int64 *nestSpec;
   std::unique_ptr<PT[]> vals;    // vals[0..isz] is log, vals[nsz-1] is special
-  std::unique_ptr<T[]> nestMods; // not all of these are used, but whatever
-  UtilAdder(int64 nsz, int64 *nestSpec)
+  std::unique_ptr<T[]> nestMods; // read setNestMods for spec
+  UtilAdder(int64 nsz, const int64 *nestSpec)
       : nsz(nsz), nestSpec(nestSpec), vals(new PT[nsz]), nestMods(new T[nsz]) {}
   /// set voff so that vars[isz + 1 - voff] is mod for first nest
+  /// actually if from then vars[from + 1 - voff] is mod for first nest
   template <class TI>
   void setNestMods(const TI &vars, int64 voff, const int64 from = 0) {
     int64 ii = from + 1 + nestSpec[from];
-    if (nestSpec[ii] && from) {
+    if (nestSpec[ii] || from) {
       for (int64 i = from + 1; i < ii; i++) {
-        nestMods[i] = vars[i - voff] / vars[nestSpec[i] - voff - 1];
-      }
-    } else if (nestSpec[ii] || from) {
-      for (int64 i = from + 1; i < ii; i++) {
-        nestMods[i] = vars[nestSpec[i] - voff - !from];
+        if (i == nestSpec[i]) {
+          if (from) {
+            nestMods[i] = vars[i - voff];
+          } else {
+            nestMods[i] = 1;
+          }
+        } else {
+          int counter = 0;
+          int64 li = ii;
+          while (li < nestSpec[i]) {
+            li += nestSpec[li] + 1;
+            counter++;
+          }
+          if (from) {
+            nestMods[i] = vars[i - voff] / vars[nestSpec[i] - voff - counter];
+          } else {
+            nestMods[i] = vars[nestSpec[i] - voff - counter];
+          }
+        }
       }
     }
     if (nestSpec[ii]) {
@@ -137,14 +161,22 @@ template <class T> struct UtilAdder {
   }
   int64 varsDepth() const {
     int64 toret = 0;
-    int64 i = 1;
-    while (i != nestSpec[i]) {
-      i = nestSpec[i];
+    int64 i = 1 + nestSpec[0];
+    while (nestSpec[i]) {
+      i += nestSpec[i] + 1;
       toret++;
     }
     return toret;
   }
-  int64 varsLen() const { return nsz - nestSpec[0] - 2 - varsDepth(); }
+  int64 varsLen() const {
+    int64 toret = 0;
+    int64 i = 1 + nestSpec[0];
+    while (nestSpec[i]) {
+      toret += nestSpec[i];
+      i += nestSpec[i] + 1;
+    }
+    return toret;
+  }
 
   void clearVals() {
     for (int64 i = nsz; i--;) {
@@ -166,12 +198,12 @@ template <class T> struct UtilAdder {
       T tmp;
       if (from) {
         tmp = CppAD::pow(vals[i].v, nestMods[i]);
-      } else if (nestSpec[ni]) {
-        tmp = CppAD::exp(vals[i].v / nestMods[i]);
-      } else {
+      } else if (i == nestSpec[i]) {
         tmp = CppAD::exp(vals[i].v);
+      } else {
+        tmp = CppAD::exp(vals[i].v / nestMods[i]);
       }
-      int64 ii = nestSpec[ni] ? nestSpec[i] : ni;
+      int64 ii = i == nestSpec[i] ? nsz - 1 : nestSpec[i];
       vals[ii].v = vals[ii].z ? vals[ii].v + tmp : tmp;
       vals[ii].z = true;
       vals[ii].n += vals[i].n;
@@ -179,25 +211,38 @@ template <class T> struct UtilAdder {
     if (nestSpec[ni]) {
       setLayers(ni);
     } else {
-      vals[ni].n += vals[0].n;
+      if (vals[0].z) {
+        vals[ni].z = true;
+        vals[ni].n += vals[0].n;
+      }
     }
   }
   /// call setLayers first, does not include the multinomial constant factor
   void addTo(T &l) const {
     int64 i = 0;
     for (int64 end = nestSpec[i]; ++i <= end;) {
-      l += nestSpec[nestSpec[0] + 1] ? vals[i].n * vals[i].v / nestMods[i]
-                                     : vals[i].n * vals[i].v;
+      if (vals[i].z) {
+        l += vals[i].n *
+             (i == nestSpec[i] ? vals[i].v : vals[i].v / nestMods[i]);
+      }
     }
     while (nestSpec[i]) {
       for (int64 end = i + nestSpec[i]; ++i <= end;) {
-        l += vals[i].n * (nestMods[i] - 1) * CppAD::log(vals[i].v);
+        // there might be empty nests due to the z values being false
+        if (vals[i].z) {
+          l += vals[i].n * (nestMods[i] - 1) * CppAD::log(vals[i].v);
+        }
       }
     }
-    l -= vals[i].n * CppAD::log(vals[0].z + vals[i].v);
+    if (vals[i].z) {
+      l -= vals[i].n * CppAD::log(vals[0].z + vals[i].v);
+    }
   }
   /// call setLayers first, given values passed to set, get prob of class i
   T getProb(int64 i) const {
+    if (!vals[i].z) {
+      return 0;
+    }
     T res =
         i ? CppAD::exp(i == nestSpec[i] ? vals[i].v : vals[i].v / nestMods[i])
           : 1;
@@ -217,9 +262,9 @@ template <class Reader, class Adder> struct FG_eval {
       typename std::remove_reference<Adder>::type>::type::value_type value_type;
   typedef CPPAD_TESTVECTOR(ADd) ADvector;
   void operator()(ADvector &fg, const ADvector &beta) const {
-    assert(fg.size() == 1);
-    assert(beta.size() == r.isz * r.xsz + a.varsLen());
-    a.setNestMods(beta, r.isz + 2 - r.isz * r.xsz);
+    ASSERT_T(fg.size() == 1);
+    ASSERT_T(static_cast<int64>(beta.size()) == r.isz * r.xsz + a.varsLen());
+    a.setNestMods(beta, r.isz + 1 - r.isz * r.xsz);
     ADd t = 0;
     // expecting readN on r
     while (r.next()) {
@@ -247,7 +292,7 @@ template <class Reader, class Adder> struct FG_eval {
   // while using r.out.n[i] as pointer offset for r.norig
   template <class Dvec>
   void generateData(const Dvec &beta, bitgen_t *bitgen_state) const {
-    assert(beta.size() == r.isz * r.xsz + a.varsLen());
+    ASSERT_T(static_cast<int64>(beta.size()) == r.isz * r.xsz + a.varsLen());
     a.setNestMods(beta, r.isz + 1 - r.isz * r.xsz);
     // as passed to random_multinomial:
     npy_intp d = r.isz + 1;
@@ -271,11 +316,19 @@ template <class Reader, class Adder> struct FG_eval {
         a.set(i1 + 1, tmp, 0);
       }
       a.setLayers();
-      // lazy me
       std::memset(pix.get(), 0, sizeof(double) * d);
+      double totalp = 0;
       for (int64 i = r.isz + 1; i--;) {
         if (r.out.z[i]) {
           pix[i] = a.getProb(i);
+          totalp += pix[i];
+        }
+      }
+      ASSERT_T(std::abs(totalp - 1) < 1e-3);
+      // so numpy doesn't complain
+      if (totalp > 1) {
+        for (int64 i = r.isz + 1; i--;) {
+          pix[i] /= totalp;
         }
       }
       random_multinomial(bitgen_state, r.out.t, mnix.get(), pix.get(), d,
@@ -378,7 +431,7 @@ PyObject *solve(PyObject *, PyObject *args) {
   CppAD::ipopt::solve<Dvector, decltype(fg_eval)>(std::string(options), bi, bl,
                                                   bu, Dvector(0), Dvector(0),
                                                   fg_eval, solution);
-  assert(solution.status == decltype(solution)::success);
+  ASSERT_T(solution.status == decltype(solution)::success);
   npy_intp tmp[2] = {isz, xsz};
   PyObject *par = PyArray_ZEROS(2, tmp, NPY_DOUBLE, 0);
   if (!par) {
@@ -410,111 +463,170 @@ PyObject *solve(PyObject *, PyObject *args) {
 
 // -- tests?
 
+// just following the formula directly, ugly lel
 void slowWriteProbs3L(const int64 *nestSpec, const bool *z, const double *u,
                       const double *in, const double *ou, double *p) {
   int64 isz = nestSpec[0];
   int64 insz = nestSpec[isz + 1];
   int64 ousz = nestSpec[isz + insz + 2];
+  int64 inoff = isz + 2;
+  int64 ouoff = isz + insz + 3;
   for (int64 i = 0; i <= isz; i++) {
     if (!z[i]) {
+      p[i] = 0;
       continue;
     }
     p[i] = 1;
     if (i) {
+      int64 innest;
+      int64 ounest;
+      if (i == nestSpec[i]) {
+        innest = ounest = -1;
+      } else if (nestSpec[i] == nestSpec[nestSpec[i]]) {
+        if (nestSpec[i] < isz + insz + 2) {
+          innest = nestSpec[i];
+          ounest = -1;
+        } else {
+          innest = -1;
+          ounest = nestSpec[nestSpec[i]];
+        }
+      } else {
+        innest = nestSpec[i];
+        ounest = nestSpec[nestSpec[i]];
+      }
+      double innmod = innest >= 0 ? in[innest - inoff] : 1;
+      double ounmod = ounest >= 0 ? ou[ounest - ouoff] : 1;
+      p[i] = std::exp(u[i] / (innest >= 0 ? innmod : ounmod));
       double tmp = 0;
-      int64 innest = nestSpec[i] - isz - 2;
-      int64 ounest = nestSpec[nestSpec[i]] - isz - insz - 3;
-      p[i] = std::exp(u[i] / in[innest]);
       for (int64 j = 1; j <= isz; j++) {
-        if (z[j] && nestSpec[j] == nestSpec[i]) {
-          tmp += std::exp(u[j] / in[innest]);
+        if (z[j] && nestSpec[j] == innest) {
+          tmp += std::exp(u[j] / innmod);
         }
       }
-      p[i] *= std::pow(tmp, in[innest] / ou[ounest] - 1);
+      p[i] *= tmp ? std::pow(tmp, innmod / ounmod - 1) : 1;
       tmp = 0;
-      for (int64 k = isz + 2; k < isz + insz + 2; k++) {
-        if (nestSpec[k] == nestSpec[nestSpec[i]]) {
+      for (int64 j = 1; j <= isz; j++) {
+        if (z[j] && nestSpec[j] == ounest) {
+          tmp += std::exp(u[j] / ounmod);
+        }
+      }
+      for (int64 k = inoff; k < inoff + insz; k++) {
+        if (nestSpec[k] == ounest) {
           double itmp = 0;
           for (int64 j = 1; j <= isz; j++) {
             if (z[j] && nestSpec[j] == k) {
-              itmp += std::exp(u[j] / in[k - isz - 2]);
+              itmp += std::exp(u[j] / in[k - inoff]);
             }
           }
-          tmp += std::pow(itmp, in[k - isz - 2] / ou[ounest]);
+          tmp += itmp ? std::pow(itmp, in[k - inoff] / ounmod) : 0;
         }
       }
-      p[i] *= std::pow(tmp, ou[ounest] - 1);
+      p[i] *= tmp ? std::pow(tmp, ounmod - 1) : 1;
     }
     double tmp = z[0];
-    for (int64 l = isz + insz + 3; l < isz + insz + ousz + 3; l++) {
+    for (int64 j = 1; j <= isz; j++) {
+      if (z[j] && j == nestSpec[j]) {
+        tmp += std::exp(u[j]);
+      }
+    }
+    for (int64 k = inoff; k < inoff + insz; k++) {
+      if (k == nestSpec[k]) {
+        double itmp = 0;
+        for (int64 j = 1; j <= isz; j++) {
+          if (z[j] && nestSpec[j] == k) {
+            itmp += std::exp(u[j] / in[k - inoff]);
+          }
+        }
+        tmp += itmp ? std::pow(itmp, in[k - inoff]) : 0;
+      }
+    }
+    for (int64 l = ouoff; l < ouoff + ousz; l++) {
       double otmp = 0;
-      for (int64 k = isz + 2; k < isz + insz + 2; k++) {
+      for (int64 j = 1; j <= isz; j++) {
+        if (z[j] && nestSpec[j] == l) {
+          otmp += std::exp(u[j] / ou[l - ouoff]);
+        }
+      }
+      for (int64 k = inoff; k < inoff + insz; k++) {
         if (nestSpec[k] == l) {
           double itmp = 0;
           for (int64 j = 1; j <= isz; j++) {
             if (z[j] && nestSpec[j] == k) {
-              itmp += std::exp(u[j] / in[k - isz - 2]);
+              itmp += std::exp(u[j] / in[k - inoff]);
             }
           }
-          otmp += std::pow(itmp, in[k - isz - 2] / ou[l - isz - insz - 3]);
+          otmp += itmp ? std::pow(itmp, in[k - inoff] / ou[l - ouoff]) : 0;
         }
       }
-      tmp += std::pow(otmp, ou[l - isz - insz - 3]);
+      tmp += otmp ? std::pow(otmp, ou[l - ouoff]) : 0;
     }
     p[i] /= tmp;
   }
 }
 
 PyObject *runTests(PyObject *, PyObject *) {
-  int64 nestSpec[] = {10, 14, 14, 14, 15, 16, 16, 16, 12, 13, 13,
-                      5,  19, 19, 18, 18, 18, 2,  18, 19, 0};
-  UtilAdder<double> utilAdder(21, nestSpec);
+  // outer(29:3): 31 31 30 32 30 32 -
+  // clean inner: 22 23 24 25 26 27 28
+  // -----------
+  // inner(21:7): -  26 25 27 30 -  22 28 22 26 -  31 24 30 23 -  24 25 27 32 23
+  // class(0:20): 0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20
+  const int64 nestSpec[] = {
+      20, 26, 25, 27, 30, 5,  22, 28, 22, 26, 10,
+      31, 24, 30, 23, 15, 24, 25, 27, 32, 23, // class
+
+      7,  31, 31, 30, 32, 30, 32, 28, // inner
+
+      3,  30, 31, 32, // outer
+
+      0,
+  };
+  const int64 isz = nestSpec[0];
+  const int64 insz = nestSpec[isz + 1];
+  const int64 ousz = nestSpec[isz + insz + 2];
+  UtilAdder<double> utilAdder(sizeof(nestSpec) / sizeof(int64), nestSpec);
   std::uniform_int_distribution<int> disti(0, 1);
   std::uniform_real_distribution<double> distr(-10, 10);
-  std::uniform_real_distribution<double> dists(0, 1);
+  std::uniform_real_distribution<double> dists(0.1, 1);
   for (int spam = 0; spam < 1000; spam++) {
     std::mt19937 mtrand(spam);
-    bool z[11];
+    bool z[isz + 1];
     bool zpass = false;
-    for (int i = 0; i <= 10; i++) {
+    for (int i = 0; i <= isz; i++) {
       z[i] = disti(mtrand);
       if (z[i]) {
         zpass = true;
       }
     }
     if (!zpass) {
-      z[4] = true; // no reason
+      // no reason for the 4
+      z[4] = true;
     }
-    double u[] = {0,
-                  distr(mtrand),
-                  distr(mtrand),
-                  distr(mtrand),
-                  distr(mtrand),
-                  distr(mtrand),
-                  distr(mtrand),
-                  distr(mtrand),
-                  distr(mtrand),
-                  distr(mtrand),
-                  distr(mtrand)};
-    double vars[] = {dists(mtrand), dists(mtrand), dists(mtrand), dists(mtrand),
-                     dists(mtrand), dists(mtrand), dists(mtrand)};
-    // double u[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-    // double vars[] = {12, 13, 14, 15, 16, 18, 19};
-
+    double u[isz + 1];
+    for (int i = 0; i <= isz; i++) {
+      u[i] = distr(mtrand);
+    }
+    double vars[insz + ousz];
+    for (int i = 0; i < insz + ousz; i++) {
+      vars[i] = dists(mtrand);
+    }
     double *in = vars;
-    double *ou = in + 5;
-    double p[10];
+    double *ou = in + insz;
+    double p[isz + 1];
     slowWriteProbs3L(nestSpec, z, u, in, ou, p);
-    utilAdder.setNestMods(vars, 11);
+    utilAdder.setNestMods(vars, isz + 1);
     utilAdder.clearVals();
-    for (int i = 0; i <= 10; i++) {
+    for (int i = 0; i <= isz; i++) {
       if (z[i]) {
         utilAdder.set(i, u[i], 0);
       }
     }
     utilAdder.setLayers();
-    for (int i = 0; i <= 10; i++) {
-      if (z[i] && !(std::abs(utilAdder.getProb(i) - p[i]) < 1e-5)) {
+    for (int i = 0; i <= isz; i++) {
+      double utilAdderP = utilAdder.getProb(i);
+      if (std::abs(utilAdderP - p[i]) >= 1e-5) {
+        std::cerr << "on iteration " << spam << ", class " << i
+                  << ", utilAdder.getProb(i) == " << utilAdderP
+                  << " while p[i] == " << p[i] << std::endl;
         return NULL;
       }
     }
