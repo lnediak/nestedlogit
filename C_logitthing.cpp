@@ -17,11 +17,12 @@
 
 #include <cppad/ipopt/solve.hpp>
 
-#define STRINGIFY(s) #s
+#define STRINGIFY_(s) #s
+#define STRINGIFY(s) STRINGIFY_(s)
 #define ASSERT_T(expr)                                                         \
   if (!(expr)) {                                                               \
-    throw std::runtime_error(STRINGIFY(__FILE__) ":" STRINGIFY(                \
-        __LINE__) ": `" #expr "` not true.");                                  \
+    throw std::runtime_error(__FILE__ ":" STRINGIFY(__LINE__) ": `" #expr      \
+                                                              "` not true.");  \
   }
 
 #define PRINT_V(expr) std::cout << #expr ": " << (expr) << std::endl
@@ -108,7 +109,6 @@ template <class Tt, class Ti, class Tn, bool readN> struct DataReader {
 /**
   nestSpec[0] is isz
   nestSpec[1..isz] will give an index, in nestSpec of the nest class i is in
-  nestSpec[isz+1] is the number of nests
   nestSpec[j] will give an index, in nestSpec of the nest that nest j is in
   etc...
   nestSpec[j] == j says that j is on the highest level of nesting,
@@ -128,55 +128,25 @@ template <class T> struct UtilAdder {
   UtilAdder(int64 nsz, const int64 *nestSpec)
       : nsz(nsz), nestSpec(nestSpec), vals(new PT[nsz]), nestMods(new T[nsz]) {}
   /// set voff so that vars[isz + 1 - voff] is mod for first nest
-  /// actually if from then vars[from + 1 - voff] is mod for first nest
-  template <class TI>
-  void setNestMods(const TI &vars, int64 voff, const int64 from = 0) {
-    int64 ii = from + 1 + nestSpec[from];
-    if (nestSpec[ii] || from) {
-      for (int64 i = from + 1; i < ii; i++) {
-        if (i == nestSpec[i]) {
-          if (from) {
-            nestMods[i] = vars[i - voff];
-          } else {
-            nestMods[i] = 1;
-          }
+  template <class TI> void setNestMods(const TI &vars, int64 voff) {
+    for (int64 i = 1; i < nsz - 1; i++) {
+      if (i == nestSpec[i]) {
+        if (i > nestSpec[0]) {
+          nestMods[i] = vars[i - voff];
         } else {
-          int counter = 0;
-          int64 li = ii;
-          while (li < nestSpec[i]) {
-            li += nestSpec[li] + 1;
-            counter++;
-          }
-          if (from) {
-            nestMods[i] = vars[i - voff] / vars[nestSpec[i] - voff - counter];
-          } else {
-            nestMods[i] = vars[nestSpec[i] - voff - counter];
-          }
+          nestMods[i] = 1;
+        }
+      } else {
+        if (i > nestSpec[0]) {
+          nestMods[i] = vars[i - voff] / vars[nestSpec[i] - voff];
+        } else {
+          nestMods[i] = vars[nestSpec[i] - voff];
         }
       }
     }
-    if (nestSpec[ii]) {
-      setNestMods(vars, voff + 1, ii);
-    }
   }
-  int64 varsDepth() const {
-    int64 toret = 0;
-    int64 i = 1 + nestSpec[0];
-    while (nestSpec[i]) {
-      i += nestSpec[i] + 1;
-      toret++;
-    }
-    return toret;
-  }
-  int64 varsLen() const {
-    int64 toret = 0;
-    int64 i = 1 + nestSpec[0];
-    while (nestSpec[i]) {
-      toret += nestSpec[i];
-      i += nestSpec[i] + 1;
-    }
-    return toret;
-  }
+
+  int64 varsLen() const { return nsz - 2 - nestSpec[0]; }
 
   void clearVals() {
     for (int64 i = nsz; i--;) {
@@ -189,14 +159,13 @@ template <class T> struct UtilAdder {
     vals[i].n = n;
     vals[i].z = true;
   }
-  void setLayers(int64 from = 0) {
-    int64 ni = from + 1 + nestSpec[from];
-    for (int64 i = from + 1; i < ni; i++) {
+  void setLayers() {
+    for (int64 i = 1; i < nsz - 1; i++) {
       if (!vals[i].z) {
         continue;
       }
       T tmp;
-      if (from) {
+      if (i > nestSpec[0]) {
         tmp = CppAD::pow(vals[i].v, nestMods[i]);
       } else if (i == nestSpec[i]) {
         tmp = CppAD::exp(vals[i].v);
@@ -208,34 +177,31 @@ template <class T> struct UtilAdder {
       vals[ii].z = true;
       vals[ii].n += vals[i].n;
     }
-    if (nestSpec[ni]) {
-      setLayers(ni);
-    } else {
-      if (vals[0].z) {
-        vals[ni].z = true;
-        vals[ni].n += vals[0].n;
-      }
+    if (vals[0].z) {
+      int64 ii = nsz - 1;
+      vals[ii].v = vals[ii].z ? vals[ii].v + 1 : 1;
+      vals[ii].z = true;
+      vals[ii].n += vals[0].n;
     }
   }
   /// call setLayers first, does not include the multinomial constant factor
   void addTo(T &l) const {
     int64 i = 0;
-    for (int64 end = nestSpec[i]; ++i <= end;) {
+    while (++i <= nestSpec[0]) {
       if (vals[i].z) {
         l += vals[i].n *
              (i == nestSpec[i] ? vals[i].v : vals[i].v / nestMods[i]);
       }
     }
-    while (nestSpec[i]) {
-      for (int64 end = i + nestSpec[i]; ++i <= end;) {
-        // there might be empty nests due to the z values being false
-        if (vals[i].z) {
-          l += vals[i].n * (nestMods[i] - 1) * CppAD::log(vals[i].v);
-        }
+    i--;
+    while (++i < nsz - 1) {
+      // there might be empty nests due to the z values being false
+      if (vals[i].z) {
+        l += vals[i].n * (nestMods[i] - 1) * CppAD::log(vals[i].v);
       }
     }
     if (vals[i].z) {
-      l -= vals[i].n * CppAD::log(vals[0].z + vals[i].v);
+      l -= vals[i].n * CppAD::log(vals[i].v);
     }
   }
   /// call setLayers first, given values passed to set, get prob of class i
@@ -250,7 +216,7 @@ template <class T> struct UtilAdder {
       i = nestSpec[i];
       res *= CppAD::pow(vals[i].v, nestMods[i] - 1);
     }
-    return res / (vals[0].z + vals[nsz - 1].v);
+    return res / vals[nsz - 1].v;
   }
 };
 
@@ -396,7 +362,9 @@ PyObject *genData(PyObject *, PyObject *args) {
 PyObject *solve(PyObject *, PyObject *args) {
   const char *options;
   PyArrayObject *ns, *t, *i, *x, *n;
-  if (!PyArg_ParseTuple(args, "sOOOOO", &options, &ns, &t, &i, &x, &n)) {
+  if (!PyArg_ParseTuple(args, "sO!O!O!O!O!", &options, &PyArray_Type, &ns,
+                        &PyArray_Type, &t, &PyArray_Type, &i, &PyArray_Type, &x,
+                        &PyArray_Type, &n)) {
     PyErr_SetString(PyExc_ValueError, "parsing arguments went wrong?");
     return NULL;
   }
@@ -415,14 +383,14 @@ PyObject *solve(PyObject *, PyObject *args) {
   typedef CPPAD_TESTVECTOR(double) Dvector;
   std::size_t betasz = isz * xsz + utilAdder.varsLen();
   Dvector bi(betasz), bl(betasz), bu(betasz);
+  // XXX: add option for these
   for (std::size_t ii = isz * xsz; ii--;) {
     bi[ii] = 0;
-    bl[ii] = -1e19;
-    bu[ii] = 1e19;
+    bl[ii] = -10;
+    bu[ii] = 10;
   }
-  // XXX: add option for these
   for (std::size_t ii = isz * xsz; ii < betasz; ii++) {
-    bi[ii] = bl[ii] = 0;
+    bi[ii] = bl[ii] = 0.1;
     bu[ii] = 1;
   }
   CppAD::ipopt::solve_result<Dvector> solution;
@@ -440,30 +408,31 @@ PyObject *solve(PyObject *, PyObject *args) {
   }
   std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(par)),
               &solution.x[0], sizeof(double) * isz * xsz);
-  PyObject *ret = PyTuple_New(1 + utilAdder.varsDepth());
+  npy_intp nmods = utilAdder.varsLen();
+  PyObject *var = PyArray_ZEROS(1, &nmods, NPY_DOUBLE, 0);
+  if (!var) {
+    PyErr_SetString(PyExc_RuntimeError, "failed to create a new np array");
+    return NULL;
+  }
+  std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(par)),
+              &solution.x[isz * xsz], sizeof(double) * nmods);
+  PyObject *ret = PyTuple_New(2);
   if (!ret) {
     PyErr_SetString(PyExc_RuntimeError, "failed to create a new tuple");
     return NULL;
   }
   PyTuple_SetItem(ret, 0, par);
-  int64 soli = isz * xsz;
-  for (int64 i = isz + 1, ri = 1; nestSpec[i];
-       i += 1 + nestSpec[i], soli += nestSpec[i], ri++) {
-    PyObject *var = PyArray_ZEROS(1, &nestSpec[i], NPY_DOUBLE, 0);
-    if (!var) {
-      PyErr_SetString(PyExc_RuntimeError, "failed to create a new np array");
-      return NULL;
-    }
-    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(par)),
-                &solution.x[soli], sizeof(double) * nestSpec[i]);
-    PyTuple_SetItem(ret, ri, var);
-  }
+  PyTuple_SetItem(ret, 1, var);
   return ret;
 }
 
 // -- tests?
 
-// just following the formula directly, ugly lel
+/*
+  just following the formula directly, ugly lel... fyi, this assumes my old
+  format for nestSpec, which includes a counts for each "layer" (just like isz);
+  example in runTests
+*/
 void slowWriteProbs3L(const int64 *nestSpec, const bool *z, const double *u,
                       const double *in, const double *ou, double *p) {
   int64 isz = nestSpec[0];
@@ -570,7 +539,7 @@ PyObject *runTests(PyObject *, PyObject *) {
   // -----------
   // inner(21:7): -  26 25 27 30 -  22 28 22 26 -  31 24 30 23 -  24 25 27 32 23
   // class(0:20): 0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20
-  const int64 nestSpec[] = {
+  const int64 nestSpecOld[] = {
       20, 26, 25, 27, 30, 5,  22, 28, 22, 26, 10,
       31, 24, 30, 23, 15, 24, 25, 27, 32, 23, // class
 
@@ -580,9 +549,27 @@ PyObject *runTests(PyObject *, PyObject *) {
 
       0,
   };
-  const int64 isz = nestSpec[0];
-  const int64 insz = nestSpec[isz + 1];
-  const int64 ousz = nestSpec[isz + insz + 2];
+  const int64 isz = nestSpecOld[0];
+  const int64 insz = nestSpecOld[isz + 1];
+  const int64 ousz = nestSpecOld[isz + insz + 2];
+
+  int64 nestSpec[sizeof(nestSpecOld) / sizeof(int64) - 2];
+  nestSpec[0] = nestSpecOld[0];
+  for (int64 ii = 0, count = 0; nestSpecOld[ii];
+       ii += nestSpecOld[ii] + 1, count++) {
+    for (int64 i = ii + 1; i <= ii + nestSpecOld[ii]; i++) {
+      int64 val = nestSpecOld[i];
+      if (val > isz) {
+        val--;
+      }
+      if (val > isz + insz) {
+        val--;
+      }
+      nestSpec[i - count] = val;
+    }
+  }
+  nestSpec[sizeof(nestSpec) / sizeof(int64) - 1] = 0;
+
   UtilAdder<double> utilAdder(sizeof(nestSpec) / sizeof(int64), nestSpec);
   std::uniform_int_distribution<int> disti(0, 1);
   std::uniform_real_distribution<double> distr(-10, 10);
@@ -612,8 +599,8 @@ PyObject *runTests(PyObject *, PyObject *) {
     double *in = vars;
     double *ou = in + insz;
     double p[isz + 1];
-    slowWriteProbs3L(nestSpec, z, u, in, ou, p);
-    utilAdder.setNestMods(vars, isz + 1);
+    slowWriteProbs3L(nestSpecOld, z, u, in, ou, p);
+    utilAdder.setNestMods(&vars[0], isz + 1);
     utilAdder.clearVals();
     for (int i = 0; i <= isz; i++) {
       if (z[i]) {
@@ -627,6 +614,7 @@ PyObject *runTests(PyObject *, PyObject *) {
         std::cerr << "on iteration " << spam << ", class " << i
                   << ", utilAdder.getProb(i) == " << utilAdderP
                   << " while p[i] == " << p[i] << std::endl;
+        PyErr_SetString(PyExc_RuntimeError, "read above");
         return NULL;
       }
     }
