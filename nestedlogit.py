@@ -13,40 +13,41 @@ def ad_logsumexp(a):
     return scipy.special.logsumexp(a)
 
 
+class NestNode:
+    parent = None  # means root
+    children = []  # empty means leaf
+
+    # for a nest, this is the "utility" before exponentiating nest mod
+    utility = 0.
+
+    i = 0  # class or nest index
+    is_valid = False  # from exog if leaf
+
+    # nest_mod is n / p where p is exponent (from params) of parent nest,
+    # n is exponent (from params) of current nest. These values are 1 if
+    # they do not exist, it is just p for leafs, and is 0 for root node.
+    nest_mod = 0.
+
+    # leaf-only:
+    name = 0  # class name
+    count = 0  # from endog
+    # nest-only:
+    utility_extra = None  # utility from exog vals for the nest, if any
+
+    def __init__(self, a=[]):
+        try:
+            self.children = list(a)
+        except TypeError:
+            self.name = a
+
+
 class NestSpec:
     """
     Describes a specification of nests.
     """
 
-    class NestNode:
-        parent = None  # means root
-        children = []  # empty means leaf
-
-        # for a nest, this is the "utility" before exponentiating nest mod
-        utility = 0.
-
-        i = 0  # class or nest index
-        is_valid = False  # from exog if leaf
-
-        # nest_mod is n / p where p is exponent (from params) of parent nest,
-        # n is exponent (from params) of current nest. These values are 1 if
-        # they do not exist, it is just p for leafs, and is 0 for root node.
-        nest_mod = 0.
-
-        # leaf-only:
-        name = 0  # class name
-        count = 0  # from endog
-        # nest-only:
-        utility_extra = None  # utility from exog vals for the nest, if any
-
-        def __init__(self, a=[]):
-            try:
-                self.children = list(a)
-            except TypeError:
-                self.name = a
-
     root = NestNode([NestNode(0)])  # root node
-    nodes = [root[0]]
+    nodes = [root.children[0], root]
     class_name_to_i = {0: 0}
     num_classes = 0  # null class not included
     num_nests = 1  # just the root
@@ -70,11 +71,11 @@ class NestSpec:
             raise ValueError("Same class in multiple nests")
         for i in range(1, len(self.nodes)):
             self.nodes[i].i = i
-            class_name_to_i[self.nodes[i].name] = i
+            self.class_name_to_i[self.nodes[i].name] = i
         i = 0
         seen = set()
         # this way, nodes on the same level end up together
-        nodesr = [root]
+        nodesr = [self.root]
         while i < len(nodesr):
             for child in reversed(nodesr[i].children):
                 if child.children and id(child) not in seen:
@@ -131,15 +132,15 @@ class NestSpec:
         for i in range(1, len(self.nodes) - 1):
             if self.nodes[i].parent != self.root:
                 if i > self.num_classes:
-                    nestMods[i] = arr[i - voff] / \
+                    self.nodes[i].nest_mod = arr[i - voff] / \
                         arr[self.nodes[i].parent.i - voff]
                 else:
-                    nestMods[i] = arr[self.nodes[i].parent.i - voff]
+                    self.nodes[i].nest_mod = arr[self.nodes[i].parent.i - voff]
             else:
                 if i > self.num_classes:
-                    nestMods[i] = arr[i - voff]
+                    self.nodes[i].nest_mod = arr[i - voff]
                 else:
-                    nestMods[i] = 1.
+                    self.nodes[i].nest_mod = 1.
 
     def set_nest_data(self):
         def handle_node(node):
@@ -161,7 +162,7 @@ class NestSpec:
                 node.is_valid = True
                 toret = node.utility * node.nest_mod
                 return True, \
-                    node.utility_extra ? toret + node.utility_extra: toret
+                    toret + node.utility_extra if node.utility_extra else toret
             if node.is_valid:
                 return True, node.utility / node.nest_mod
             return False, 0.
@@ -202,15 +203,15 @@ class CustomModelBase(smd.DiscreteModel):
         super().__init__(endog, exog, **kwargs)
         # TODO: FIGURE OUT WHAT THE HELL TO DO WITH df_model and k_extra
 
-    @cached_value
-    def loglike_casadi_sx_(self):
-        return self.loglike_casadi_sx()
-
     def loglike_casadi_sx(self):
         """
         Returns [p,f,g,H] where p,f,g,H are all SX
         """
         raise NotImplementedError
+
+    @cached_value
+    def loglike_casadi_sx_(self):
+        return self.loglike_casadi_sx()
 
     def loglike(self, params):
         p, f, g, H = self.loglike_casadi_sx_()
@@ -227,21 +228,25 @@ class CustomModelBase(smd.DiscreteModel):
         p, f, g, H = self.loglike_casadi_sx_()
         return _sx_eval(H, p, params)
 
-    def fit(self, start_params, lbx=-np.inf, ubx=np.inf, constraints=None):
+    def fit_res(self, params):
+        Hinv = np.linalg.inv(-_sx_eval(H, p, params))
+        # TODO: OTHER OPTIONS
+        mlefit = smm.LikelihoodModelResults(self, params, Hinv, scale=1.)
+
+        # any modification to mlefit necessary?
+        return mlefit
+
+    def fit(self, start_params, lbx=-np.inf, ubx=np.inf, constraints=None,
+            options={}):
         """
         lbx is lower bounds on parameters, ubx is upper bounds.
         """
         # TODO: CONSTRAINTS
         p, f, g, H = self.loglike_casadi_sx_()
-        S = ad.nlpsol('S', 'ipopt', {'x': p, 'f': -f})
-        p_opt = S(x0=start_params, 'lbx'=lbx, 'ubx'=ubx)['x']
+        S = ad.nlpsol('S', 'ipopt', {'x': p, 'f': -f}, {})
+        p_opt = S(x0=start_params, lbx=lbx, ubx=ubx)['x']
 
-        Hinv = np.linalg.inv(-_sx_eval(H, p, p_opt))
-        # TODO: OTHER OPTIONS
-        mlefit = smm.LikelihoodModelResults(self, p_opt, Hinv, scale=1.)
-
-        # any modification to mlefit necessary?
-        return mlefit
+        return self.fit_res(p_opt)
 
     def fit_null(self):
         """
@@ -276,6 +281,7 @@ class NestedLogitModel(CustomModelBase):
             {self.exog_names[i]: i for i in range(len(self.exog_names))}
         self.endog_name_to_i = \
             {self.endog_names[i]: i for i in range(len(self.endog_names))}
+        print(self.endog_name_to_i)
         # TODO: ERROR CHECKING
         self.classes = dict(classes)
         self.nestspec = NestSpec(nests)
@@ -285,8 +291,8 @@ class NestedLogitModel(CustomModelBase):
         self.params = dict(params)
         self.params_l = list(self.params.items())
 
-    def loglike_casadi_sx():
-        p = ad.SX('p', len(self.params) + self.nestspec.num_nests)
+    def loglike_casadi_sx(self):
+        p = ad.SX.sym('p', len(self.params) + self.nestspec.num_nests - 1)
         self.nestspec.set_nest_mods(p, len(self.params))
 
         nestsets = [set()] * len(self.nestspec.nodes)
@@ -299,18 +305,18 @@ class NestedLogitModel(CustomModelBase):
                               for child in self.nestspec.nodes[i].children])
 
         sx_u = ad.SX.zeros(len(self.nestspec.nodes))
-        sx_vars = ad.SX('x', len(self.varz))
+        sx_vars = ad.SX.sym('x', len(self.varz))
         exog_name_to_vi = {self.varz_l[i][0]: i for i in range(len(self.varz))}
         for i in range(len(self.params)):
-            for exog_name, pclass_names in self.params_l[i][1]:
+            for exog_name, pclass_names in self.params_l[i][1].items():
                 if exog_name is None:
                     term = p[i]
-                    class_names = pclass_names
+                    class_names = set(pclass_names)
                 else:
                     vind = exog_name_to_vi[exog_name]
                     term = p[i] * sx_vars[vind]
                     vclass_names = self.varz_l[vind][1]
-                    class_names = pclass_names & vclass_names
+                    class_names = set(pclass_names) & set(vclass_names)
                 nodes = []
                 for j in range(len(nestsets) - 1, 0, -1):
                     if nestsets[j].issubset(class_names):
@@ -332,8 +338,8 @@ class NestedLogitModel(CustomModelBase):
             some_set = False
             for i in range(self.nestspec.num_classes + 1):
                 class_name = self.nestspec.nodes[i].name
-                if self.exog[i][self.exog_name_to_i[
-                        self.availability_vars[class_name]]]:
+                av_var = self.availability_vars[class_name]
+                if av_var is None or self.exog[i][self.exog_name_to_i[av_var]]:
                     some_set = True
                     self.nestspec.set_data_on_classi(
                         i, utilities[i], self.endog[i][self.endog_name_to_i[
@@ -346,6 +352,10 @@ class NestedLogitModel(CustomModelBase):
             f += self.nestspec.loglike()
 
         return p, f, ad.gradient(f, p), ad.hessian(f, p)
+
+    def fit_null(self):
+        return self.fit_res(
+            np.zeros(len(self.params) + self.nestspec.num_nests - 1))
 
 
 class CustomModelBaseResults(smd.DiscreteResults):
