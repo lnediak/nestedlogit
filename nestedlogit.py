@@ -9,7 +9,13 @@ import casadi as ad
 
 def ad_logsumexp(a):
     if isinstance(a, (ad.DM, ad.MX, ad.SX)):
-        return ad.logsumexp(a)
+        # this function actually doesn't work as of CasADi 3.6.3
+        # I'mma just use my own implementation
+        # return ad.logsumexp(a)
+        if not a.is_column():
+            raise ValueError("a is not a column vector")
+        mx = ad.mmax(a)
+        return mx + ad.log(ad.sum1(ad.exp(a - mx)))
     return scipy.special.logsumexp(a)
 
 
@@ -148,9 +154,9 @@ class NestSpec:
                 node.count = 0
                 ul = []
                 for child in node.children:
-                    is_valid, u = handle_node(node.children[i])
+                    is_valid, u = handle_node(child)
                     if is_valid:
-                        node.count += node.children[i].count
+                        node.count += child.count
                         ul.append(u)
                 if not ul:
                     node.is_valid = False
@@ -166,7 +172,7 @@ class NestSpec:
             if node.is_valid:
                 return True, node.utility / node.nest_mod
             return False, 0.
-        handle_node(root)
+        handle_node(self.root)
 
     def loglike(self):
         toret = 0
@@ -191,7 +197,7 @@ class NestSpec:
 
 
 def _sx_eval(f, x, xval):
-    return ad.Function('f', [x], [f])(xval)
+    return np.array(ad.Function('f', [x], [f])(xval))
 
 
 class CustomModelBase(smd.DiscreteModel):
@@ -201,7 +207,14 @@ class CustomModelBase(smd.DiscreteModel):
 
     def __init__(self, endog, exog, **kwargs):
         super().__init__(endog, exog, **kwargs)
+        self.param_names_instead_of_exog_names = False
         # TODO: FIGURE OUT WHAT THE HELL TO DO WITH df_model and k_extra
+
+    @property
+    def exog_names(self):
+        if self.param_names_instead_of_exog_names:
+            return self.param_names
+        return super().exog_names
 
     def loglike_casadi_sx(self):
         """
@@ -214,39 +227,45 @@ class CustomModelBase(smd.DiscreteModel):
         return self.loglike_casadi_sx()
 
     def loglike(self, params):
-        p, f, g, H = self.loglike_casadi_sx_()
-        return _sx_eval(f, p, params)
+        p, f, g, H = self.loglike_casadi_sx_
+        return _sx_eval(f, p, params).flatten()
 
     def score(self, params):
-        p, f, g, H = self.loglike_casadi_sx_()
-        return _sx_eval(g, p, params)
+        p, f, g, H = self.loglike_casadi_sx_
+        return _sx_eval(g, p, params).flatten()
 
     def information(self, params):
         return -self.hessian(params)
 
     def hessian(self, params):
-        p, f, g, H = self.loglike_casadi_sx_()
+        p, f, g, H = self.loglike_casadi_sx_
         return _sx_eval(H, p, params)
 
     def fit_res(self, params):
-        Hinv = np.linalg.inv(-_sx_eval(H, p, params))
+        p, f, g, H = self.loglike_casadi_sx_
+        Hval = _sx_eval(H, p, params)
+        Hinv = np.linalg.inv(-Hval)
         # TODO: OTHER OPTIONS
         mlefit = smm.LikelihoodModelResults(self, params, Hinv, scale=1.)
+        mlefit.mle_retvals = {'converged': True}
 
-        # any modification to mlefit necessary?
-        return mlefit
+        # TODO: THIS SHOULD ACTUALLY BE IN THE CHILD CLASS
+        results = CustomModelBaseResults(self, mlefit)
+        # any modification to results necessary?
+        return results
 
-    def fit(self, start_params, lbx=-np.inf, ubx=np.inf, constraints=None,
+    def fit(self, start_params, lbx=-10000., ubx=10000., constraints=None,
             options={}):
         """
         lbx is lower bounds on parameters, ubx is upper bounds.
         """
         # TODO: CONSTRAINTS
-        p, f, g, H = self.loglike_casadi_sx_()
-        S = ad.nlpsol('S', 'ipopt', {'x': p, 'f': -f}, {})
+        p, f, g, H = self.loglike_casadi_sx_
+        S = ad.nlpsol('S', 'ipopt', {'x': p, 'f': -f}, options)
         p_opt = S(x0=start_params, lbx=lbx, ubx=ubx)['x']
+        # TODO: FIND HOW THE HELL TO FIND EXIT STATUS
 
-        return self.fit_res(p_opt)
+        return self.fit_res(np.array(p_opt).flatten())
 
     def fit_null(self):
         """
@@ -281,7 +300,6 @@ class NestedLogitModel(CustomModelBase):
             {self.exog_names[i]: i for i in range(len(self.exog_names))}
         self.endog_name_to_i = \
             {self.endog_names[i]: i for i in range(len(self.endog_names))}
-        print(self.endog_name_to_i)
         # TODO: ERROR CHECKING
         self.classes = dict(classes)
         self.nestspec = NestSpec(nests)
@@ -290,12 +308,14 @@ class NestedLogitModel(CustomModelBase):
         self.varz_l = list(self.varz.items())
         self.params = dict(params)
         self.params_l = list(self.params.items())
+        self.param_names = [param_name for param_name, _ in self.params_l] + \
+            ['nest ' + str(i) for i in range(self.nestspec.num_nests - 1)]
 
     def loglike_casadi_sx(self):
         p = ad.SX.sym('p', len(self.params) + self.nestspec.num_nests - 1)
         self.nestspec.set_nest_mods(p, len(self.params))
 
-        nestsets = [set()] * len(self.nestspec.nodes)
+        nestsets = [set() for _ in self.nestspec.nodes]
         for i in range(self.nestspec.num_classes + 1):
             nestsets[i].add(i)
         for i in range(self.nestspec.num_classes + 1,
@@ -336,33 +356,41 @@ class NestedLogitModel(CustomModelBase):
             utilities = sxfunc_u(vars_vals, p)
             self.nestspec.clear_data()
             some_set = False
-            for i in range(self.nestspec.num_classes + 1):
-                class_name = self.nestspec.nodes[i].name
+            for j in range(self.nestspec.num_classes + 1):
+                class_name = self.nestspec.nodes[j].name
                 av_var = self.availability_vars[class_name]
                 if av_var is None or self.exog[i][self.exog_name_to_i[av_var]]:
                     some_set = True
                     self.nestspec.set_data_on_classi(
-                        i, utilities[i], self.endog[i][self.endog_name_to_i[
+                        j, utilities[j], self.endog[i][self.endog_name_to_i[
                             self.classes[class_name]]])
             if not some_set:
                 continue
-            for i in range(self.nestspec.num_classes + 1, len(nestsets)):
-                self.nestspec.set_utility_extra_on_nesti(i, utilities[i])
+            for j in range(self.nestspec.num_classes + 1, len(nestsets)):
+                self.nestspec.set_utility_extra_on_nesti(j, utilities[j])
             self.nestspec.set_nest_data()
             f += self.nestspec.loglike()
 
-        return p, f, ad.gradient(f, p), ad.hessian(f, p)
+        H, g = ad.hessian(f, p)
+        return p, f, g, H
 
     def fit_null(self):
+        # TODO: ACTUALLY DO PROPERLY
         return self.fit_res(
             np.zeros(len(self.params) + self.nestspec.num_nests - 1))
 
 
 class CustomModelBaseResults(smd.DiscreteResults):
-    @cache_readonly
+    @ cache_readonly
     def llnull(self):
         """
         For McFadden's pseudo-R^2
         """
         return self.model.fit_null().llf
+
+    def summary(self):
+        self.model.param_names_instead_of_exog_names = True
+        result = super().summary()
+        self.model.param_names_instead_of_exog_names = False
+        return result
 
