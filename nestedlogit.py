@@ -1,4 +1,5 @@
 import numpy as np
+import scipy.linalg
 import scipy.special
 import statsmodels.base.model as smm
 import statsmodels.discrete.discrete_model as smd
@@ -41,10 +42,13 @@ class NestNode:
     utility_extra = None  # utility from exog vals for the nest, if any
 
     def __init__(self, a=[]):
-        try:
-            self.children = list(a)
-        except TypeError:
+        if isinstance(a, str):
             self.name = a
+        else:
+            try:
+                self.children = list(a)
+            except TypeError:
+                self.name = a
 
 
 class NestSpec:
@@ -101,15 +105,20 @@ class NestSpec:
         Example: lst = [[2, 4], [[3, 6], 1], 5]
         """
         def set_node_to_list(node, lst):
-            try:
-                for ele in lst:
-                    node.children.append(NestNode())
-                    set_node_to_list(node.children[-1], ele)
-            except TypeError:
+            if isinstance(lst, str):
                 node.name = lst
+            else:
+                try:
+                    for ele in lst:
+                        node.children.append(NestNode())
+                        set_node_to_list(node.children[-1], ele)
+                except TypeError:
+                    node.name = lst
 
         for lst_needs_to_be_an_iterable in lst:
             pass
+        if isinstance(lst, str):
+            raise ValueError("lst needs to be an iterable other than str")
         self.root.children[0].name = null_class_name
         set_node_to_list(self.root, lst)
         self._finish_init()
@@ -244,7 +253,11 @@ class CustomModelBase(smd.DiscreteModel):
     def fit_res(self, params):
         p, f, g, H = self.loglike_casadi_sx_
         Hval = _sx_eval(H, p, params)
-        Hinv = np.linalg.inv(-Hval)
+        try:
+            Hinv = np.linalg.inv(-Hval)
+        except np.linalg.LinAlgError:
+            print(scipy.linalg.eigh(-Hval))
+            np.linalg.inv(-Hval)
         # TODO: OTHER OPTIONS
         mlefit = smm.LikelihoodModelResults(self, params, Hinv, scale=1.)
         mlefit.mle_retvals = {'converged': True}
@@ -287,6 +300,7 @@ class NestedLogitModel(CustomModelBase):
         nests: List of lists, to be passed to NestSpec.
         availability_vars: dict, each entry is (class_name: exog_name).
             If exog_name is None, assume said class is always available
+            If exog_name is missing, assume said class is never available
         varz: dict, each entry is (exog_name: class_names),
             where the given variable applies only to classes in class_names.
         params: dict, each entry is (name: spec), where spec is a dict
@@ -317,7 +331,7 @@ class NestedLogitModel(CustomModelBase):
 
         nestsets = [set() for _ in self.nestspec.nodes]
         for i in range(self.nestspec.num_classes + 1):
-            nestsets[i].add(i)
+            nestsets[i].add(self.nestspec.nodes[i].name)
         for i in range(self.nestspec.num_classes + 1,
                        len(self.nestspec.nodes)):
             nestsets[i] = \
@@ -358,12 +372,15 @@ class NestedLogitModel(CustomModelBase):
             some_set = False
             for j in range(self.nestspec.num_classes + 1):
                 class_name = self.nestspec.nodes[j].name
-                av_var = self.availability_vars[class_name]
-                if av_var is None or self.exog[i][self.exog_name_to_i[av_var]]:
-                    some_set = True
-                    self.nestspec.set_data_on_classi(
-                        j, utilities[j], self.endog[i][self.endog_name_to_i[
-                            self.classes[class_name]]])
+                if class_name in self.availability_vars:
+                    av_var = self.availability_vars[class_name]
+                    if av_var is None or \
+                            self.exog[i][self.exog_name_to_i[av_var]]:
+                        some_set = True
+                        self.nestspec.set_data_on_classi(
+                            j, utilities[j],
+                            self.endog[i][self.endog_name_to_i[
+                                self.classes[class_name]]])
             if not some_set:
                 continue
             for j in range(self.nestspec.num_classes + 1, len(nestsets)):
