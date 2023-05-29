@@ -1,2 +1,2 @@
-from .nestedlogit import NestedLogitModel
+from .model import NestedLogitModel
 
