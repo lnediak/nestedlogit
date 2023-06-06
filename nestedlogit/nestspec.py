@@ -25,7 +25,7 @@ class NestNode:
     name = 0  # class name
     count = 0  # from endog
     # nest-only:
-    utility_extra = None  # utility from exog vals for the nest, if any
+    utility_extra = 0.  # utility from exog vals for the nest, if any
 
     def __init__(self, a=[]):
         if isinstance(a, str):
@@ -112,11 +112,14 @@ class NestSpec:
     def clear_data(self):
         for node in self.nodes:
             node.is_valid = False
+            node.utility = 0.
+            node.count = 0.
+            node.utility_extra = 0.
 
-    def set_data_on_classi(self, i, utility, count):
+    def set_data_on_classi(self, i, utility, count, is_valid=True):
         self.nodes[i].utility = utility
         self.nodes[i].count = count
-        self.nodes[i].is_valid = True
+        self.nodes[i].is_valid = is_valid
 
     def set_utility_extra_on_nesti(self, i, utility_extra):
         self.nodes[i].utility_extra = utility_extra
@@ -147,12 +150,13 @@ class NestSpec:
         def handle_node(node):
             if node.children:
                 node.count = 0
+                m_is_valid = 1.
                 ul = []
                 for child in node.children:
                     is_valid, u = handle_node(child)
-                    if is_valid:
-                        node.count += child.count
-                        ul.append(u)
+                    node.count += is_valid * child.count
+                    ul.append(is_valid * u)
+                    m_is_valid *= 1 - is_valid
                 if not ul:
                     node.is_valid = False
                     return False, 0.
@@ -160,10 +164,9 @@ class NestSpec:
                 for i in range(len(ul)):
                     u[i] = ul[i]
                 node.utility = ad_logsumexp(u)
-                node.is_valid = True
+                node.is_valid = 1. - m_is_valid
                 toret = node.utility * node.nest_mod
-                return True, \
-                    toret + node.utility_extra if node.utility_extra else toret
+                return node.is_valid, toret + node.utility_extra
             if node.is_valid:
                 return True, node.utility / node.nest_mod
             return False, 0.
