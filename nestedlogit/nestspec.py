@@ -19,7 +19,7 @@ class NestNode:
     # nest_mod is n / p where p is exponent (from params) of parent nest,
     # n is exponent (from params) of current nest. These values are 1 if
     # they do not exist, it is just p for leafs, and is 0 for root node.
-    nest_mod = 0.
+    nest_mod = 1.
 
     # leaf-only:
     name = 0  # class name
@@ -155,41 +155,39 @@ class NestSpec:
                 for child in node.children:
                     is_valid, u = handle_node(child)
                     node.count += is_valid * child.count
-                    ul.append(is_valid * u)
+                    ul.append((is_valid, u))
                     m_is_valid *= 1 - is_valid
                 if not ul:
                     node.is_valid = False
                     return False, 0.
                 u = ad.SX.zeros(len(ul))
+                z = ad.SX.zeros(len(ul))
                 for i in range(len(ul)):
-                    u[i] = ul[i]
-                node.utility = ad_logsumexp(u)
+                    u[i] = ul[i][1]
+                    z[i] = ul[i][0]
+                node.utility = ad_logsumexp(u, b=z)
                 node.is_valid = 1. - m_is_valid
                 toret = node.utility * node.nest_mod
                 return node.is_valid, toret + node.utility_extra
-            if node.is_valid:
-                return True, node.utility / node.nest_mod
-            return False, 0.
+            return node.is_valid, node.is_valid * node.utility / node.nest_mod
         handle_node(self.root)
 
     def loglike(self):
         toret = 0
         for node in self.nodes:
-            if node.is_valid:
-                if node.children:
-                    # recall self.root.nest_mod == 0
-                    toret += node.count * (node.nest_mod - 1) * node.utility
-                else:
-                    toret += node.count * node.utility / node.nest_mod
+            if node.children:
+                # recall self.root.nest_mod == 0
+                toret += node.is_valid * node.count * \
+                    (node.nest_mod - 1) * node.utility
+            else:
+                toret += node.is_valid * node.count * node.utility / node.nest_mod
         return toret
 
-    def log_prob(self, i):
+    def get_prob(self, i):
         node = self.nodes[i]
-        if not node.is_valid:
-            return 0.
         toret = node.utility / node.nest_mod
         while node.parent:
             node = node.parent
             toret += (node.nest_mod - 1) * node.utility
-        return toret
+        return node.is_valid * ad.exp(toret)
 
