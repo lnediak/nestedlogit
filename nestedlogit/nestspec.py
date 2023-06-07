@@ -42,11 +42,12 @@ class NestSpec:
     Describes a specification of nests.
     """
 
-    root = NestNode([NestNode(0)])  # root node
-    nodes = [root.children[0], root]
-    class_name_to_i = {0: 0}
-    num_classes = 0  # null class not included
-    num_nests = 1  # just the root
+    def _basic_init(self):
+        self.root = NestNode([NestNode(0)])  # root node
+        self.nodes = [self.root.children[0], self.root]
+        self.class_name_to_i = {0: 0}
+        self.num_classes = 0  # null class not included
+        self.num_nests = 1  # just the root
 
     def _finish_init(self):
         def act_on_node(node, parent, lst):
@@ -64,6 +65,7 @@ class NestSpec:
         class_names = [leaf.name for leaf in self.nodes[1:]]
         self.num_classes = len(class_names)
         if len(set(class_names)) != len(class_names):
+            print(class_names)
             raise ValueError("Same class in multiple nests")
         for i in range(1, len(self.nodes)):
             self.nodes[i].i = i
@@ -83,6 +85,7 @@ class NestSpec:
             self.nodes[i].i = i
 
     def __init__(self):
+        self._basic_init()
         self._finish_init()
 
     def __init__(self, lst, null_class_name=0):
@@ -105,6 +108,7 @@ class NestSpec:
             pass
         if isinstance(lst, str):
             raise ValueError("lst needs to be an iterable other than str")
+        self._basic_init()
         self.root.children[0].name = null_class_name
         set_node_to_list(self.root, lst)
         self._finish_init()
@@ -189,5 +193,5 @@ class NestSpec:
         while node.parent:
             node = node.parent
             toret += (node.nest_mod - 1) * node.utility
-        return node.is_valid * ad.exp(toret)
+        return self.nodes[i].is_valid * ad.exp(toret)
 

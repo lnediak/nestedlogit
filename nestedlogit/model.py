@@ -8,7 +8,7 @@ import statsmodels.discrete.discrete_model as smd
 from statsmodels.tools.decorators import cached_value, cache_readonly
 
 
-from .util import sx_eval
+from .util import sx_eval, random_multinomial
 from .nestspec import NestSpec
 
 
@@ -131,14 +131,21 @@ class NestedLogitModel(CustomModelBase):
         self.varz = dict(varz)
         self.params = dict(params)
 
+        self.classes_r = {self.classes[class_name]: class_name
+                          for class_name in self.classes}
         self.availability_vars_l = list(self.availability_vars.items())
         self.availability_var_to_i = \
-            {self.availability_vars[class_name]: class_name
-             for class_name in self.availability_vars}
+            {self.availability_vars_l[i][0]: i
+             for i in range(len(self.availability_vars_l))}
         self.varz_l = list(self.varz.items())
         self.params_l = list(self.params.items())
         self.param_names = [param_name for param_name, _ in self.params_l] + \
             ['nest ' + str(i) for i in range(self.nestspec.num_nests - 1)]
+
+    @cached_value
+    def default_start_params(self):
+        return np.concatenate([np.zeros(len(self.params_l)),
+                               np.ones(self.nestspec.num_nests - 1)])
 
     # writes the utilities and everything into self.nestspec
     def load_nestspec(self, params, varz, av_vars, counts):
@@ -190,52 +197,99 @@ class NestedLogitModel(CustomModelBase):
             self.nestspec.set_utility_extra_on_nesti(j, utilities[j])
         self.nestspec.set_nest_data()
 
-    def loglike_casadi_sx(self):
+    def _stack_all_sx(self, stack_counts):
         params = ad.SX.sym('p', len(self.params) + self.nestspec.num_nests - 1)
         varz = ad.SX.sym('x', len(self.varz))
         av_vars = ad.SX.sym('z', len(self.availability_vars))
         counts = ad.SX.sym('n', self.nestspec.num_classes + 1)
+        return (params, varz, av_vars, counts,
+                [params] +
+                [varz[i] for i in range(varz.shape[0])] +
+                [av_vars[i] for i in range(av_vars.shape[0])] +
+                ([counts[i] for i in range(counts.shape[0])] if stack_counts
+                 else []))
+
+    def _stack_all_vals(self, params, exog, endog=None):
+        """
+        Counterpart to _stack_all_sx providing values corresponding to the list
+        of symbolic variables returned
+        """
+        return ([params] +
+                [exog[:, self.exog_name_to_i[exog_name]][None, :]
+                 for exog_name, _ in self.varz_l] +
+                [True if exog_name is None else
+                 exog[:, self.exog_name_to_i[exog_name]][None, :]
+                 for _, exog_name in self.availability_vars_l] +
+                ([] if endog is None else
+                 [endog[:, self.endog_name_to_i[
+                     self.classes[self.nestspec.nodes[i].name]]][None, :]
+                  if self.nestspec.nodes[i].name in self.classes else 0.
+                  for i in range(self.nestspec.num_classes + 1)]))
+
+    def loglike_casadi_sx(self):
+        params, varz, av_vars, counts, stacked_args = self._stack_all_sx(True)
         self.load_nestspec(params, varz, av_vars, counts)
 
         loglike_sx = self.nestspec.loglike()
-        loglike_f = ad.Function('f', [params] +
-                                [varz[i] for i in range(varz.shape[0])] +
-                                [av_vars[i] for i in range(av_vars.shape[0])] +
-                                [counts[i] for i in range(counts.shape[0])],
-                                [loglike_sx])
+        loglike_f = ad.Function('f', stacked_args, [loglike_sx])
 
-        ll_elem = loglike_f(
-            params,
-            *[self.exog[:, self.exog_name_to_i[exog_name]][None, :]
-              for exog_name, _ in self.varz_l],
-            *[True if exog_name is None else
-              self.exog[:, self.exog_name_to_i[exog_name]][None, :]
-              for _, exog_name in self.availability_vars_l],
-            *[self.endog[:, self.endog_name_to_i[
-                self.classes[self.nestspec.nodes[i].name]]][None, :]
-                if self.nestspec.nodes[i].name in self.classes else 0.
-              for i in range(self.nestspec.num_classes + 1)])
+        stacked_args_vals = self._stack_all_vals(params, self.exog, self.endog)
+        ll_elem = loglike_f(*stacked_args_vals)
         f = ad.sum2(ll_elem)
         H, g = ad.hessian(f, params)
         return params, f, g, H
 
-    # Return (params, probs)
     @cached_value
-    def probs_casadi_func(self):
-        params = ad.SX.sym('p', len(self.params) + self.nestspec.num_nests - 1)
-        probs = ad.SX.zeros(self.nestspec.num_classes + 1)
-        for i in range(self.nestspec.num_classes + 1):
-            pass
-            # probs[i] = TODO
+    def _probs_casadi_func(self):
+        params, varz, av_vars, counts, stacked_args = self._stack_all_sx(False)
+        self.load_nestspec(params, varz, av_vars, counts)
 
-    def predict(self, params):
-        pass
-        # TODO
+        probs_sx = ad.SX.sym('q', self.nestspec.num_classes + 1)
+        for i in range(self.nestspec.num_classes + 1):
+            probs_sx[i] = self.nestspec.get_prob(i)
+
+        return ad.Function('q', stacked_args, [probs_sx])
+
+    def predict(self, params, exog=None, which='mean', total_counts=None):
+        if exog is None:
+            exog = self.exog
+        if total_counts is None:
+            total_counts = np.full(exog.shape[0], 1)
+        assert total_counts.shape == (exog.shape[0],)
+        params = np.array(params)
+        total_counts = total_counts[:, None]
+        stacked_args_vals = self._stack_all_vals(params, self.exog)
+        probs = np.array(self._probs_casadi_func(*stacked_args_vals)).T
+        if which == 'mean':
+            return total_counts * probs
+        elif which == 'var':
+            return total_counts * probs * (1 - probs)
+        raise ValueError("which must be 'mean' or 'var'")
+
+    # bitgen is a np.Generator, returns dict as passed to pandas DataFrame
+    def generate_endog(self, bitgen, params, exog=None, total_counts=None):
+        if exog is None:
+            exog = self.exog
+        exog = np.asarray(exog)
+        if total_counts is None:
+            total_counts = np.full(exog.shape[0], 1)
+        probs = self.predict(params, exog, total_counts=total_counts)
+        probs /= np.sum(probs, axis=1)[:, None] + 1e-14
+        # TODO: numerical stability
+        out = random_multinomial(bitgen, total_counts, probs, exog.shape[0])
+        dout = {}
+        # so the order is same as in endog
+        for endog_name in self.endog_names:
+            if endog_name in self.classes_r:
+                class_name = self.classes_r[endog_name]
+                if class_name in self.nestspec.class_name_to_i:
+                    i = self.nestspec.class_name_to_i[class_name]
+                    dout[endog_name] = out[:, i]
+        return dout
 
     def fit_null(self):
         # TODO: ACTUALLY DO PROPERLY
-        return self.fit_res(
-            np.zeros(len(self.params) + self.nestspec.num_nests - 1))
+        return self.fit_res(self.default_start_params)
 
 
 class CustomModelBaseResults(smd.DiscreteResults):

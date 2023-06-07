@@ -43,6 +43,8 @@ nmodel = nestedlogit.NestedLogitModel(
 res = nmodel.fit(np.zeros(len(nmodel.params)),
                  options={"ipopt": {"print_level": 4}})
 
+# print(nmodel.generate_endog(np.random.default_rng(1), res.params))
+
 print("nestedlogit.NestedLogitModel:")
 print(res.summary())
 
