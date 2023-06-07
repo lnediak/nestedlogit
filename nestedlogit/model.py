@@ -15,6 +15,8 @@ from .nestspec import NestSpec
 class CustomModelBase(smd.DiscreteModel):
     """
     This base class uses a Casadi SXFunction for the log-likelihood.
+
+    Need default_start_params, default_lbx, and default_ubx as attributes
     """
 
     def __init__(self, endog, exog, **kwargs):
@@ -58,7 +60,7 @@ class CustomModelBase(smd.DiscreteModel):
         p, f, g, H = self.loglike_casadi_sx_
         return sx_eval(H, p, params)
 
-    def fit_res(self, params):
+    def fit_result(self, params):
         p, f, g, H = self.loglike_casadi_sx_
         Hval = sx_eval(H, p, params)
         try:
@@ -76,18 +78,24 @@ class CustomModelBase(smd.DiscreteModel):
         # any modification to results necessary?
         return results
 
-    def fit(self, start_params, lbx=-10000., ubx=10000., constraints=None,
+    def fit(self, start_params=None, lbx=None, ubx=None, constraints=None,
             options={}):
         """
         lbx is lower bounds on parameters, ubx is upper bounds.
         """
+        if start_params is None:
+            start_params = self.default_start_params
+        if lbx is None:
+            lbx = self.default_lbx
+        if ubx is None:
+            ubx = self.default_ubx
         # TODO: CONSTRAINTS
         p, f, g, H = self.loglike_casadi_sx_
         S = ad.nlpsol('S', 'ipopt', {'x': p, 'f': -f}, options)
         p_opt = S(x0=start_params, lbx=lbx, ubx=ubx)['x']
         # TODO: FIND HOW THE HELL TO FIND EXIT STATUS
 
-        return self.fit_res(np.array(p_opt).flatten())
+        return self.fit_result(np.array(p_opt).flatten())
 
     def fit_null(self):
         """
@@ -145,6 +153,16 @@ class NestedLogitModel(CustomModelBase):
     @cached_value
     def default_start_params(self):
         return np.concatenate([np.zeros(len(self.params_l)),
+                               np.ones(self.nestspec.num_nests - 1)])
+
+    @cached_value
+    def default_lbx(self):
+        return np.concatenate([np.full(len(self.params_l), -np.inf),
+                               np.full(self.nestspec.num_nests - 1, 0.1)])
+
+    @cached_value
+    def default_ubx(self):
+        return np.concatenate([np.full(len(self.params_l), np.inf),
                                np.ones(self.nestspec.num_nests - 1)])
 
     # writes the utilities and everything into self.nestspec
@@ -289,7 +307,7 @@ class NestedLogitModel(CustomModelBase):
 
     def fit_null(self):
         # TODO: ACTUALLY DO PROPERLY
-        return self.fit_res(self.default_start_params)
+        return self.fit_result(self.default_start_params)
 
 
 class CustomModelBaseResults(smd.DiscreteResults):
