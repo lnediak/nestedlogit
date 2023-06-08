@@ -26,7 +26,6 @@ def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
         nests=['c', ['a', 'b']],
         availability_vars={0: 'nop_available',
                            'a': None, 'b': None, 'c': None},
-        varz={'price_a': ['a'], 'price_b': ['b'], 'price_c': ['c']},
         params={
             **({'intercept_a': {None: ['a']}} if include_intercept_a else {}),
             'intercept_b': {None: ['b']},

@@ -109,7 +109,7 @@ class NestedLogitModel(CustomModelBase):
     Nested Logit model.
     """
 
-    def __init__(self, endog, exog, classes, nests, availability_vars, varz,
+    def __init__(self, endog, exog, classes, nests, availability_vars,  # varz,
                  params, **kwargs):
         """
         classes: dict, each entry is (class_name: endog_name),
@@ -118,8 +118,6 @@ class NestedLogitModel(CustomModelBase):
         availability_vars: dict, each entry is (class_name: exog_name).
             If exog_name is None, assume said class is always available
             If exog_name is missing, assume said class is never available
-        varz: dict, each entry is (exog_name: class_names),
-            where the given variable applies only to classes in class_names.
         params: dict, each entry is (name: spec), where spec is a dict
             where each entry is (exog_name: class_names).
             exog_name is None means intercept
@@ -136,7 +134,7 @@ class NestedLogitModel(CustomModelBase):
         self.classes = dict(classes)
         self.nestspec = NestSpec(nests)
         self.availability_vars = dict(availability_vars)
-        self.varz = dict(varz)
+        # self.varz = dict(varz)
         self.params = dict(params)
 
         self.classes_r = {self.classes[class_name]: class_name
@@ -145,10 +143,13 @@ class NestedLogitModel(CustomModelBase):
         self.availability_var_to_i = \
             {self.availability_vars_l[i][0]: i
              for i in range(len(self.availability_vars_l))}
-        self.varz_l = list(self.varz.items())
+        # self.varz_l = list(self.varz.items())
         self.params_l = list(self.params.items())
         self.param_names = [param_name for param_name, _ in self.params_l] + \
             ['nest ' + str(i) for i in range(self.nestspec.num_nests - 1)]
+        self.varz = [
+            exog_name for _, spec in self.params_l
+            for exog_name in spec if exog_name is not None]
 
     @cached_value
     def default_start_params(self):
@@ -179,17 +180,15 @@ class NestedLogitModel(CustomModelBase):
                               for child in self.nestspec.nodes[i].children])
 
         utilities = ad.SX.zeros(len(self.nestspec.nodes))
-        exog_name_to_vi = {self.varz_l[i][0]: i for i in range(len(self.varz))}
+        exog_name_to_vi = {self.varz[i]: i for i in range(len(self.varz))}
         for i in range(len(self.params)):
             for exog_name, pclass_names in self.params_l[i][1].items():
                 if exog_name is None:
                     term = params[i]
-                    class_names = set(pclass_names)
                 else:
                     vind = exog_name_to_vi[exog_name]
                     term = params[i] * varz[vind]
-                    vclass_names = self.varz_l[vind][1]
-                    class_names = set(pclass_names) & set(vclass_names)
+                class_names = set(pclass_names)
                 nodes = []
                 for j in range(len(nestsets) - 1, 0, -1):
                     if nestsets[j].issubset(class_names):
@@ -234,7 +233,7 @@ class NestedLogitModel(CustomModelBase):
         """
         return ([params] +
                 [exog[:, self.exog_name_to_i[exog_name]][None, :]
-                 for exog_name, _ in self.varz_l] +
+                 for exog_name in self.varz] +
                 [True if exog_name is None else
                  exog[:, self.exog_name_to_i[exog_name]][None, :]
                  for _, exog_name in self.availability_vars_l] +
