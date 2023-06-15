@@ -26,9 +26,6 @@ print(res.summary())
 
 yy = np.zeros((len(y), nc))
 yy[np.arange(len(y)), y] = 1.
-casadi_function_opts = {
-    'jit': True, 'compiler': 'shell',
-    'jit_options': {'verbose': True, 'compiler': 'gcc', 'flags': ['-O3']}}
 nmodel = nestedlogit.NestedLogitModel(
     nestedlogit.NdarrayModelData(yy, X),
     classes={i: 'y' + str(i + 1) for i in range(nc)},
@@ -36,7 +33,9 @@ nmodel = nestedlogit.NestedLogitModel(
     availability_vars={i: None for i in range(nc)},
     params={nf * i + j: {'x' + str(j + 1): [i]}
             for i in range(1, nc) for j in range(nf)},
-    casadi_function_opts=casadi_function_opts)
+    casadi_function_opts={
+        'jit': True, 'compiler': 'shell',
+        'jit_options': {'compiler': 'gcc', 'flags': ['-O3']}})
 res = nmodel.fit(ipopt_options={"print_level": 2})
 
 print("nestedlogit.NestedLogitModel:")
