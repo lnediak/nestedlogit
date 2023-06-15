@@ -3,7 +3,7 @@ import pandas as pd
 
 import nestedlogit
 
-n_samples = 10000
+n_samples = 100000
 
 bitgen = np.random.default_rng(seed=1)
 
@@ -16,10 +16,14 @@ endog = pd.DataFrame(np.broadcast_to(np.zeros(1), (n_samples, 4)),
 
 classes = ['a', 'b', 'c']
 
+casadi_function_opts = {
+    'jit': True, 'compiler': 'shell',
+    'jit_options': {'compiler': 'gcc', 'flags': ['-O3']}}
+
 
 def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
     return nestedlogit.NestedLogitModel(
-        nestedlogit.PandasModelData(endog, exog),
+        nestedlogit.PandasModelData(endog, exog, 10000),
         classes={0: 'none_count', 'a': 'a_count',
                  'b': 'b_count', 'c': 'c_count'},
         nests=['c', ['a', 'b']],
@@ -36,9 +40,7 @@ def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
                 {'price_sensitivity':
                  {'price_a': ['a'], 'price_b': ['b'], 'price_c': ['c']}}
             )},
-        casadi_function_opts={
-            'jit': True, 'compiler': 'shell',
-            'jit_options': {'compiler': 'gcc', 'flags': ['-O3']}})
+        casadi_function_opts=casadi_function_opts)
 
 
 model = init_model(endog, exog,

@@ -79,7 +79,6 @@ class ModelBase:
             out[...] = 0.
         outshape = out.shape
         out = np.atleast_1d(out.squeeze())
-        assert self.data.max_rows == self.nobs
         for i in range(0, self.nobs, self.data.max_rows):
             nrows = min(self.data.max_rows, self.nobs - i)
             endog, exog = self.data.get_endog_exog(i, i + nrows)
