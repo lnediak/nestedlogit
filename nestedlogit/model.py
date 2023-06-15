@@ -61,6 +61,7 @@ class ModelBase:
     @cached_value
     def _loglike_casadi_funcs(self):
         p, y, x, f, g, H = self._loglike_casadi_sym()
+        H = ad.tril(H)
         args = [p, y, x]
         return (ad.Function('f', args, [f], self.casadi_function_opts),
                 ad.Function('g', args, [g], self.casadi_function_opts),
@@ -73,17 +74,16 @@ class ModelBase:
         Assumption: f output is column vector or scalar
         """
         if out is None:
-            out = np.zeros(f.size_out(0))
+            out = np.zeros(f.size_out(0)).squeeze()
         else:
             out[...] = 0.
         outshape = out.shape
-        if out.ndim < 2:
-            out = out[:, None]
+        out = np.atleast_1d(out.squeeze())
+        assert self.data.max_rows == self.nobs
         for i in range(0, self.nobs, self.data.max_rows):
-            endog, exog = self.data.get_endog_exog(
-                i, min(i + self.data.max_rows, self.nobs))
-            res = f(params, endog.T, exog.T)
-            out[:, :] += ad.sum2(res)
+            nrows = min(self.data.max_rows, self.nobs - i)
+            endog, exog = self.data.get_endog_exog(i, i + nrows)
+            out[...] += np.sum(f(params, endog.T, exog.T).toarray(), axis=1)
         return out.reshape(outshape)
 
     def loglike(self, params):
@@ -94,14 +94,16 @@ class ModelBase:
         f, g, Hnz, Hsp = self._loglike_casadi_funcs
         return self._eval_casadi_function_on_data(g, params, out)
 
-    def information(self, params, sparse_out=False):
-        return -self.hessian(params, sparse_out)
+    def information(self, params, sparse_out=False, tril=False):
+        return -self.hessian(params, sparse_out, tril)
 
-    def hessian(self, params, sparse_out=False):
+    def hessian(self, params, sparse_out=False, tril=False):
         f, g, Hnz, Hsp = self._loglike_casadi_funcs
         Hdata = self._eval_casadi_function_on_data(Hnz, params)
         indptr, indices = Hsp.get_ccs()
         res = scipy.sparse.csc_matrix((Hdata.flatten(), indices, indptr))
+        if not tril:
+            res += res.T - scipy.sparse.diags(res.diagonal(), format='csc')
         return res if sparse_out else res.toarray()
 
     def _fit_result(self, params, convergence_msg):
@@ -140,7 +142,7 @@ class ModelBase:
             return out
 
         def h(params, lagrange, obj_factor, out):
-            H = -obj_factor * self.hessian(params, sparse_out=True)
+            H = -obj_factor * self.hessian(params, sparse_out=True, tril=True)
             # + lagrange...
             out[:] = H.data
             return out

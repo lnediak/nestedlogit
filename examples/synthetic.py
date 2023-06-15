@@ -3,7 +3,7 @@ import pandas as pd
 
 import nestedlogit
 
-n_samples = 1000
+n_samples = 10000
 
 bitgen = np.random.default_rng(seed=1)
 
@@ -54,12 +54,12 @@ print("nop available:")
 
 model = init_model(endog, exog,
                    vary_price_sens=False, include_intercept_a=True)
-res = model.fit(ipopt_options={'print_level': 2})
+res = model.fit(ipopt_options={'print_level': 5})
 print(res.summary())
 
 model = init_model(endog, exog,
                    vary_price_sens=True, include_intercept_a=True)
-res = model.fit(ipopt_options={'print_level': 2})
+res = model.fit(ipopt_options={'print_level': 5})
 print(res.summary())
 
 exog['nop_available'][:] = 0
@@ -67,11 +67,11 @@ print("nop not available")
 
 model = init_model(endog, exog,
                    vary_price_sens=False, include_intercept_a=False)
-res = model.fit(ipopt_options={'print_level': 2})
+res = model.fit(ipopt_options={'print_level': 5})
 print(res.summary())
 
 model = init_model(endog, exog,
                    vary_price_sens=True, include_intercept_a=False)
-res = model.fit(ipopt_options={'print_level': 2})
+res = model.fit(ipopt_options={'print_level': 5})
 print(res.summary())
 
