@@ -13,6 +13,49 @@ def ad_logsumexp(a):
     return ad.logsumexp(a)
 
 
+class CasadiFunctionWrapper:
+    def __init__(self, name, inputs, out, opts):
+        """
+        Note: inputs are all assumed to be column vectors, also len(out) == 1
+        """
+        assert len(out) == 1
+        self.name = name
+        self.inputs = inputs
+        self.out = out[0]
+        self.is_mx = isinstance(self.out, ad.MX)
+        self.opts = opts
+        self.f = ad.Function(name, inputs, out)
+        self.f_dict = {}
+
+    def __call__(self, *args):
+        assert len(args) == len(self.inputs)
+        args = list(args)
+        for i in range(len(args)):
+            if args[i].ndim < 2:
+                args[i] = args[i][:, None]
+            if args[i].shape[0] == 1:
+                args[i] = args[i].T
+            assert args[i].ndim == 2
+        shape_all = tuple([arg.shape for arg in args])
+        if shape_all in self.f_dict:
+            return self.f_dict[shape_all](*args)
+        inputs = [
+            ad.MX.sym('x', arg.shape[0], arg.shape[1]) if self.is_mx else
+            ad.MX.sym('x', arg.shape[0], arg.shape[1]) for arg in args]
+        res = ad.sum2(self.f(*inputs))
+        f = ad.Function(self.name, inputs, [res], self.opts)
+        if self.opts.get('jit', False):
+            if 'jit_options' in self.opts:
+                if self.opts['jit_options'].get('verbose', False):
+                    print('Finished compilation.')
+        self.f_dict[shape_all] = f
+        return f(*args)
+
+    def size_out(self, i):
+        assert i == 0
+        return self.out.shape
+
+
 def random_multinomial(bitgen, n, p, size):
     """
     Extends np.random.multinomial to be vectorized for different probabilities.

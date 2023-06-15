@@ -11,7 +11,7 @@ import statsmodels.discrete.discrete_model as smd
 from statsmodels.tools.decorators import cached_value, cache_readonly
 
 
-from .util import random_multinomial
+from .util import CasadiFunctionWrapper, random_multinomial
 from .nestspec import NestSpec
 
 
@@ -62,15 +62,16 @@ class ModelBase:
     def _loglike_casadi_funcs(self):
         p, y, x, f, g, H = self._loglike_casadi_sym()
         args = [p, y, x]
-        return (ad.Function('f', args, [f], self.casadi_function_opts),
-                ad.Function('g', args, [g], self.casadi_function_opts),
-                ad.Function('Hnz', args, [H.get_nz(False, slice(None))],
-                            self.casadi_function_opts),
+        opts = self.casadi_function_opts
+        return (CasadiFunctionWrapper('f', args, [f], opts),
+                CasadiFunctionWrapper('g', args, [g], opts),
+                CasadiFunctionWrapper('Hnz', args,
+                                      [H.get_nz(False, slice(None))], opts),
                 H.sparsity())
 
     def _eval_casadi_function_on_data(self, f, params, out=None):
         """
-        Assumption: f output is column vector or scalar
+        Note: f is CasadiFunctionWrapper
         """
         if out is None:
             out = np.zeros(f.size_out(0))
@@ -82,8 +83,7 @@ class ModelBase:
         for i in range(0, self.nobs, self.data.max_rows):
             endog, exog = self.data.get_endog_exog(
                 i, min(i + self.data.max_rows, self.nobs))
-            res = f(params, endog.T, exog.T)
-            out[:, :] += ad.sum2(res)
+            out[...] += f(params, endog.T, exog.T)
         return out.reshape(outshape)
 
     def loglike(self, params):
@@ -309,7 +309,7 @@ class NestedLogitModel(ModelBase):
         exog = np.asarray(exog)
         if total_counts is None:
             total_counts = np.broadcast_to(1., exog.shape[0])
-        total_counts = total_counts.squeeze()
+        total_counts = np.atleast_1d(total_counts.squeeze())
         assert total_counts.shape == (exog.shape[0],)
         params = np.array(params)
         total_counts = total_counts[:, None]
