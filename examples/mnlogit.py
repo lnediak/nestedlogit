@@ -1,8 +1,9 @@
-import nestedlogit
 import numpy as np
 from sklearn.datasets import make_classification
 from sklearn.linear_model import LogisticRegression
 import statsmodels.api as sms
+
+import nestedlogit
 
 ns = 500
 nc = 3
@@ -26,13 +27,16 @@ print(res.summary())
 yy = np.zeros((len(y), nc))
 yy[np.arange(len(y)), y] = 1.
 nmodel = nestedlogit.NestedLogitModel(
-    yy, X, classes={i: 'y' + str(i + 1) for i in range(nc)},
+    nestedlogit.NdarrayModelData(yy, X),
+    classes={i: 'y' + str(i + 1) for i in range(nc)},
     nests=list(range(1, nc)),
     availability_vars={i: None for i in range(nc)},
     params={nf * i + j: {'x' + str(j + 1): [i]}
-            for i in range(1, nc) for j in range(nf)})
-res = nmodel.fit(np.zeros(len(nmodel.params)),
-                 options={"ipopt": {"print_level": 2}})
+            for i in range(1, nc) for j in range(nf)},
+    casadi_function_opts={
+        'jit': True, 'compiler': 'shell',
+        'jit_options': {'compiler': 'gcc', 'flags': ['-O3']}})
+res = nmodel.fit(ipopt_options={"print_level": 2})
 
 print("nestedlogit.NestedLogitModel:")
 print(res.summary())

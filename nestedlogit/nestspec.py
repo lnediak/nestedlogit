@@ -1,7 +1,5 @@
 import casadi as ad
 import numpy as np
-import scipy.special
-
 
 from .util import ad_logsumexp
 
@@ -161,15 +159,13 @@ class NestSpec:
                     node.count += is_valid * child.count
                     ul.append((is_valid, u))
                     m_is_valid *= 1 - is_valid
-                if not ul:
-                    node.is_valid = False
-                    return False, 0.
                 u = ad.SX.zeros(len(ul))
                 z = ad.SX.zeros(len(ul))
                 for i in range(len(ul)):
                     u[i] = ul[i][1]
                     z[i] = ul[i][0]
-                node.utility = ad_logsumexp(u, b=z)
+                # for z = 0,1, equivalent to logsumexp(log(z) + u)
+                node.utility = 1. + ad_logsumexp(-1. / z + u)
                 node.is_valid = 1. - m_is_valid
                 toret = node.utility * node.nest_mod
                 return node.is_valid, toret + node.utility_extra

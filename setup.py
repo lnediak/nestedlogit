@@ -14,5 +14,7 @@ setup(name='nestedlogit',
           'statsmodels',
           'scipy',
           'numpy',
+          'pandas',
+          'ipyopt'
       ])
 

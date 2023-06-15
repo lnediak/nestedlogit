@@ -19,8 +19,7 @@ classes = ['a', 'b', 'c']
 
 def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
     return nestedlogit.NestedLogitModel(
-        endog,
-        exog,
+        nestedlogit.PandasModelData(endog, exog),
         classes={0: 'none_count', 'a': 'a_count',
                  'b': 'b_count', 'c': 'c_count'},
         nests=['c', ['a', 'b']],
@@ -36,15 +35,18 @@ def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
                 if vary_price_sens else
                 {'price_sensitivity':
                  {'price_a': ['a'], 'price_b': ['b'], 'price_c': ['c']}}
-            )})
+            )},
+        casadi_function_opts={
+            'jit': True, 'compiler': 'shell',
+            'jit_options': {'compiler': 'gcc', 'flags': ['-O3']}})
 
 
 model = init_model(endog, exog,
                    vary_price_sens=False, include_intercept_a=True)
-endog_dict = model.generate_endog(
-    bitgen, [1., 2., 3., .01, .6],
+endog_arr = model.generate_endog(
+    bitgen, [1., 2., 3., .01, .6], exog,
     total_counts=bitgen.integers(200, 400, n_samples))
-endog = pd.DataFrame(endog_dict)
+endog = pd.DataFrame(endog_arr, columns=model.endog_out_colnames)
 
 # --- results
 
@@ -52,12 +54,12 @@ print("nop available:")
 
 model = init_model(endog, exog,
                    vary_price_sens=False, include_intercept_a=True)
-res = model.fit(options={'ipopt': {'print_level': 2}})
+res = model.fit(ipopt_options={'print_level': 2})
 print(res.summary())
 
 model = init_model(endog, exog,
                    vary_price_sens=True, include_intercept_a=True)
-res = model.fit(options={'ipopt': {'print_level': 2}})
+res = model.fit(ipopt_options={'print_level': 2})
 print(res.summary())
 
 exog['nop_available'][:] = 0
@@ -65,11 +67,11 @@ print("nop not available")
 
 model = init_model(endog, exog,
                    vary_price_sens=False, include_intercept_a=False)
-res = model.fit(options={'ipopt': {'print_level': 2}})
+res = model.fit(ipopt_options={'print_level': 2})
 print(res.summary())
 
 model = init_model(endog, exog,
                    vary_price_sens=True, include_intercept_a=False)
-res = model.fit(options={'ipopt': {'print_level': 2}})
+res = model.fit(ipopt_options={'print_level': 2})
 print(res.summary())
 
