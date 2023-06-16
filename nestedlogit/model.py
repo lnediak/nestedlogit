@@ -1,6 +1,5 @@
 import casadi as ad
-import ipyopt
-from ipyopt.optimize import IPOPT_RETURN_CODES
+import cyipopt
 import numpy as np
 import scipy.linalg
 import scipy.sparse
@@ -44,7 +43,7 @@ class ModelBase:
     def exog_names(self):
         """
         self.param_names_instead_of_exog_names exists because statsmodels
-        summary uses exog_names for names of params
+        summary uses exog_names for names instead of params.
         """
         if getattr(self, 'param_names_instead_of_exog_names', False):
             return self.param_names
@@ -125,52 +124,51 @@ class ModelBase:
         """
         lbx is lower bounds on parameters, ubx is upper bounds.
         """
-        def f(params):
-            return -self.loglike(params)
+        class LoglikeSpec:
+            def __init__(self, model):
+                self.model = model
 
-        def grad_f(params, out):
-            self.score(params, out)
-            out[:] = -out
-            return out
+            def objective(self, params):
+                return -self.model.loglike(params)
 
-        # TODO: CONSTRAINTS
-        def g(params, out):
-            return out
+            def gradient(self, params):
+                return -self.model.score(params)
 
-        def jac_g(params, out):
-            return out
+            # TODO: CONSTRAINTS
+            def constraints(self, params):
+                return np.empty(0)
 
-        def h(params, lagrange, obj_factor, out):
-            H = -obj_factor * self.hessian(params, sparse_out=True, tril=True)
-            # + lagrange...
-            out[:] = H.data
-            return out
+            def jacobian(params):
+                return np.empty((0, len(params)))
 
-        Hsp = self._loglike_casadi_funcs[3]
-        Hccs = Hsp.get_ccs()
-        Hindptr = np.array(Hccs[0])
-        Hcolindices = np.repeat(np.arange(len(Hindptr) - 1),
-                                Hindptr[1:] - Hindptr[:-1])
-        Hrowindices = np.array(Hccs[1])
+            def hessian(self, params, lagrange, obj_factor):
+                H = -obj_factor * \
+                    self.model.hessian(params, sparse_out=True, tril=True)
+                # + lagrange...
+                return H.data
 
-        nlp = ipyopt.Problem(
+            def hessianstructure(self):
+                Hsp = self.model._loglike_casadi_funcs[3]
+                Hccs = Hsp.get_ccs()
+                Hindptr = np.array(Hccs[0])
+                Hcolindices = np.repeat(np.arange(len(Hindptr) - 1),
+                                        Hindptr[1:] - Hindptr[:-1])
+                Hrowindices = np.array(Hccs[1])
+                return (Hrowindices, Hcolindices)
+
+        nlp = cyipopt.Problem(
             n=self.num_params,
-            x_l=np.array(lbx),
-            x_u=np.array(ubx),
             m=0,
-            g_l=np.empty(0),
-            g_u=np.empty(0),
-            sparsity_indices_jac_g=(np.empty(0), np.empty(0)),
-            sparsity_indices_h=(Hrowindices, Hcolindices),
-            eval_f=f,
-            eval_grad_f=grad_f,
-            eval_g=g,
-            eval_jac_g=jac_g,
-            eval_h=h,
-            ipopt_options=dict(ipopt_options))
-        p_opt, llf, status = nlp.solve(x0=start_params.copy())
+            problem_obj=LoglikeSpec(self),
+            lb=np.array(lbx),
+            ub=np.array(ubx),
+            cl=np.empty(0),
+            cu=np.empty(0))
+        for key, value in ipopt_options.items():
+            nlp.add_option(key, value)
+        p_opt, info = nlp.solve(start_params.copy())
         return self._fit_result(np.array(p_opt).flatten(),
-                                IPOPT_RETURN_CODES[status])
+                                info['status_msg'])
 
     def fit_null(self):
         """

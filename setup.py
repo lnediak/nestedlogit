@@ -11,10 +11,10 @@ setup(name='nestedlogit',
       # TODO: appropriate version numbers
       install_requires=[
           'casadi',
-          'statsmodels',
-          'scipy',
+          'cyipopt',
           'numpy',
           'pandas',
-          'ipyopt'
+          'scipy',
+          'statsmodels'
       ])
 

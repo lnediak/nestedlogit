@@ -4,9 +4,7 @@ build
 __pycache__
 venv
 
-libipopt.so*
-cppad_include
-ipopt_include
+ipopt_dir
 
 /random_stuff/
 

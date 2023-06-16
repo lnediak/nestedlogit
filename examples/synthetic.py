@@ -45,6 +45,7 @@ def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
 
 model = init_model(endog, exog,
                    vary_price_sens=False, include_intercept_a=True)
+### data generation is here: TODO: params as dict
 endog_arr = model.generate_endog(
     bitgen, [1., 2., 3., .01, .6], exog,
     total_counts=bitgen.integers(200, 400, n_samples))
