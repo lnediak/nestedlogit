@@ -33,4 +33,3 @@ def random_multinomial(bitgen, n, p, size):
         remaining_p -= p[..., j]
     out[..., -1] = dn
     return out
-

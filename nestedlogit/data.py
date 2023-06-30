@@ -2,17 +2,18 @@ import numpy as np
 import pandas as pd
 
 
-def generic_get_names(df, prefix='', default=None):
+def generic_get_names(df, prefix="", default=None):
     if isinstance(df, pd.DataFrame):
         if isinstance(df.columns, pd.MultiIndex):
             # flatten MultiIndex
-            return ['_'.join((level for level in c if level))
-                    for c in df.columns]
+            return [
+                "_".join((level for level in c if level)) for c in df.columns
+            ]
         return list(df.columns)
     elif isinstance(df, pd.Series):
         if arr.name:
             return [arr.name]
-        return [prefix + '1']
+        return [prefix + "1"]
     elif isinstance(df, np.ndarray):
         return [prefix + str(i) for i in range(1, df.shape[1] + 1)]
     try:
@@ -73,10 +74,10 @@ class NdarrayModelData(AbstractModelData):
         assert self.endog.size and self.exog.size
 
     def xnames(self):
-        return generic_get_names(self.exog, prefix='x')
+        return generic_get_names(self.exog, prefix="x")
 
     def ynames(self):
-        return generic_get_names(self.endog, prefix='y')
+        return generic_get_names(self.endog, prefix="y")
 
     def get_endog_exog(self, start, stop):
         return self.endog[start:stop, :], self.exog[start:stop, :]
@@ -100,16 +101,18 @@ class PandasModelData(AbstractModelData):
         assert self.endog.size and self.exog.size
 
     def xnames(self):
-        return generic_get_names(self.exog, prefix='x')
+        return generic_get_names(self.exog, prefix="x")
 
     def ynames(self):
-        return generic_get_names(self.endog, prefix='y')
+        return generic_get_names(self.endog, prefix="y")
 
     def get_endog_exog(self, start, stop):
-        self.endog_scratch[:stop - start, :] = self.endog.iloc[start:stop]
-        self.exog_scratch[:stop - start, :] = self.exog.iloc[start:stop]
-        return (self.endog_scratch[:stop - start, :],
-                self.exog_scratch[:stop - start, :])
+        self.endog_scratch[: stop - start, :] = self.endog.iloc[start:stop]
+        self.exog_scratch[: stop - start, :] = self.exog.iloc[start:stop]
+        return (
+            self.endog_scratch[: stop - start, :],
+            self.exog_scratch[: stop - start, :],
+        )
 
 
 class IndexedModelData(AbstractModelData):
@@ -129,25 +132,41 @@ class IndexedModelData(AbstractModelData):
         the columns will be ['y1'/'x1', etc.] which will be keys in tables.
         """
         self.endog_inds = pd.DataFrame(
-            endog_inds, columns=generic_get_names(endog_inds, prefix='y'))
+            endog_inds, columns=generic_get_names(endog_inds, prefix="y")
+        )
         self.exog_inds = pd.DataFrame(
-            exog_inds, columns=generic_get_names(exog_inds, prefix='x'))
-        self.tables = {table_name: pd.DataFrame(tables[table_name])
-                       for table_name in tables}
+            exog_inds, columns=generic_get_names(exog_inds, prefix="x")
+        )
+        self.tables = {
+            table_name: pd.DataFrame(tables[table_name])
+            for table_name in tables
+        }
         self.nobs = len(self.endog_inds)
 
         self.endog_names = [
-            c for table_name in self.endog_inds.columns
-            for c in self.tables[table_name]]
+            c
+            for table_name in self.endog_inds.columns
+            for c in self.tables[table_name]
+        ]
         self.exog_names = [
-            c for table_name in self.exog_inds.columns
-            for c in self.tables[table_name]]
+            c
+            for table_name in self.exog_inds.columns
+            for c in self.tables[table_name]
+        ]
         self.endog_colinds = np.cumsum(
-            [0] + [tables[table_name].shape[1]
-                   for table_name in self.endog_inds.columns])
+            [0]
+            + [
+                tables[table_name].shape[1]
+                for table_name in self.endog_inds.columns
+            ]
+        )
         self.exog_colinds = np.cumsum(
-            [0] + [tables[table_name].shape[1]
-                   for table_name in self.exog_inds.columns])
+            [0]
+            + [
+                tables[table_name].shape[1]
+                for table_name in self.exog_inds.columns
+            ]
+        )
 
         self.endog_shape = (self.nobs, self.endog_colinds[-1])
         self.exog_shape = (self.nobs, self.exog_colinds[-1])
@@ -174,17 +193,19 @@ class IndexedModelData(AbstractModelData):
         for i in range(len(self.endog_inds.columns)):
             table_name = self.endog_inds.columns[i]
             self.endog_scratch[
-                :stop - start,
-                self.endog_colinds[i]:self.endog_colinds[i + 1]] = \
-                self.tables[table_name].iloc[
-                    self.endog_inds[table_name][start:stop, :]]
+                : stop - start,
+                self.endog_colinds[i] : self.endog_colinds[i + 1],
+            ] = self.tables[table_name].iloc[
+                self.endog_inds[table_name][start:stop, :]
+            ]
         for i in range(len(self.exog_inds.columns)):
             table_name = self.exog_inds.columns[i]
             self.exog_scratch[
-                :stop - start,
-                self.exog_colinds[i]:self.exog_colinds[i + 1]] = \
-                self.tables[table_name].iloc[
-                    self.exog_inds[table_name][start:stop, :]]
-        return (self.endog_scratch[:stop - start, :],
-                self.exog_scratch[:stop - start, :])
-
+                : stop - start, self.exog_colinds[i] : self.exog_colinds[i + 1]
+            ] = self.tables[table_name].iloc[
+                self.exog_inds[table_name][start:stop, :]
+            ]
+        return (
+            self.endog_scratch[: stop - start, :],
+            self.exog_scratch[: stop - start, :],
+        )

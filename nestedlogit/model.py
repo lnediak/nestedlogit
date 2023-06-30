@@ -25,18 +25,20 @@ class ModelBase:
         self.exog_shape = data.exog_shape
         self.endog_shape = data.endog_shape
         self.nobs = data.nobs
-        self.exog_name_to_i = \
-            {self.exog_names[i]: i for i in range(len(self.exog_names))}
-        self.endog_name_to_i = \
-            {self.endog_names[i]: i for i in range(len(self.endog_names))}
+        self.exog_name_to_i = {
+            self.exog_names[i]: i for i in range(len(self.exog_names))
+        }
+        self.endog_name_to_i = {
+            self.endog_names[i]: i for i in range(len(self.endog_names))
+        }
         # TODO: FIGURE OUT WHAT THE HELL TO DO WITH df_model and k_extra
         self.k_extra = 0
         self.df_model = self.num_params
         self.df_resid = self.nobs - self.df_model
 
         # --- statsmodels results compatibility:
-        self.exog = np.broadcast_to(0., self.exog_shape)
-        self.endog = np.broadcast_to(0., self.endog_shape)
+        self.exog = np.broadcast_to(0.0, self.exog_shape)
+        self.endog = np.broadcast_to(0.0, self.endog_shape)
         self.param_names_instead_of_exog_names = False
 
     @property
@@ -45,7 +47,7 @@ class ModelBase:
         self.param_names_instead_of_exog_names exists because statsmodels
         summary uses exog_names for names instead of params.
         """
-        if getattr(self, 'param_names_instead_of_exog_names', False):
+        if getattr(self, "param_names_instead_of_exog_names", False):
             return self.param_names
         return self.exog_names_
 
@@ -62,11 +64,17 @@ class ModelBase:
         p, y, x, f, g, H = self._loglike_casadi_sym()
         H = ad.tril(H)
         args = [p, y, x]
-        return (ad.Function('f', args, [f], self.casadi_function_opts),
-                ad.Function('g', args, [g], self.casadi_function_opts),
-                ad.Function('Hnz', args, [H.get_nz(False, slice(None))],
-                            self.casadi_function_opts),
-                H.sparsity())
+        return (
+            ad.Function("f", args, [f], self.casadi_function_opts),
+            ad.Function("g", args, [g], self.casadi_function_opts),
+            ad.Function(
+                "Hnz",
+                args,
+                [H.get_nz(False, slice(None))],
+                self.casadi_function_opts,
+            ),
+            H.sparsity(),
+        )
 
     def _eval_casadi_function_on_data(self, f, params, out=None):
         """
@@ -75,7 +83,7 @@ class ModelBase:
         if out is None:
             out = np.zeros(f.size_out(0)).squeeze()
         else:
-            out[...] = 0.
+            out[...] = 0.0
         outshape = out.shape
         out = np.atleast_1d(out.squeeze())
         for i in range(0, self.nobs, self.data.max_rows):
@@ -101,7 +109,7 @@ class ModelBase:
         indptr, indices = Hsp.get_ccs()
         res = scipy.sparse.csc_matrix((Hdata.flatten(), indices, indptr))
         if not tril:
-            res += res.T - scipy.sparse.diags(res.diagonal(), format='csc')
+            res += res.T - scipy.sparse.diags(res.diagonal(), format="csc")
         return res if sparse_out else res.toarray()
 
     def _fit_result(self, params, convergence_msg):
@@ -113,8 +121,8 @@ class ModelBase:
             print("Eigenvalues:", scipy.linalg.eigh(-Hval)[0])
             raise
         # TODO: OTHER OPTIONS
-        mlefit = smm.LikelihoodModelResults(self, params, Hinv, scale=1.)
-        mlefit.mle_retvals = {'converged': convergence_msg}
+        mlefit = smm.LikelihoodModelResults(self, params, Hinv, scale=1.0)
+        mlefit.mle_retvals = {"converged": convergence_msg}
 
         results = CustomModelBaseResults(self, mlefit)
         # any modification to results necessary?
@@ -124,6 +132,7 @@ class ModelBase:
         """
         lbx is lower bounds on parameters, ubx is upper bounds.
         """
+
         class LoglikeSpec:
             def __init__(self, model):
                 self.model = model
@@ -142,8 +151,9 @@ class ModelBase:
                 return np.empty((0, len(params)))
 
             def hessian(self, params, lagrange, obj_factor):
-                H = -obj_factor * \
-                    self.model.hessian(params, sparse_out=True, tril=True)
+                H = -obj_factor * self.model.hessian(
+                    params, sparse_out=True, tril=True
+                )
                 # + lagrange...
                 return H.data
 
@@ -151,8 +161,9 @@ class ModelBase:
                 Hsp = self.model._loglike_casadi_funcs[3]
                 Hccs = Hsp.get_ccs()
                 Hindptr = np.array(Hccs[0])
-                Hcolindices = np.repeat(np.arange(len(Hindptr) - 1),
-                                        Hindptr[1:] - Hindptr[:-1])
+                Hcolindices = np.repeat(
+                    np.arange(len(Hindptr) - 1), Hindptr[1:] - Hindptr[:-1]
+                )
                 Hrowindices = np.array(Hccs[1])
                 return (Hrowindices, Hcolindices)
 
@@ -163,12 +174,12 @@ class ModelBase:
             lb=np.array(lbx),
             ub=np.array(ubx),
             cl=np.empty(0),
-            cu=np.empty(0))
+            cu=np.empty(0),
+        )
         for key, value in ipopt_options.items():
             nlp.add_option(key, value)
         p_opt, info = nlp.solve(start_params.copy())
-        return self._fit_result(np.array(p_opt).flatten(),
-                                info['status_msg'])
+        return self._fit_result(np.array(p_opt).flatten(), info["status_msg"])
 
     def fit_null(self):
         """
@@ -182,8 +193,15 @@ class NestedLogitModel(ModelBase):
     Nested Logit model.
     """
 
-    def __init__(self, data, classes, nests, availability_vars, params,
-                 casadi_function_opts):
+    def __init__(
+        self,
+        data,
+        classes,
+        nests,
+        availability_vars,
+        params,
+        casadi_function_opts,
+    ):
         """
         classes: dict, each entry is (class_name: endog_name),
             where the null class has a class_name of 0.
@@ -203,11 +221,13 @@ class NestedLogitModel(ModelBase):
         self.availability_vars = dict(availability_vars)
         self.params = dict(params)
 
-        self.classes_r = {self.classes[class_name]: class_name
-                          for class_name in self.classes}
+        self.classes_r = {
+            self.classes[class_name]: class_name for class_name in self.classes
+        }
         self.params_l = list(self.params.items())
-        param_names = [param_name for param_name, _ in self.params_l] + \
-            ['nest ' + str(i) for i in range(self.nestspec.num_nests - 1)]
+        param_names = [param_name for param_name, _ in self.params_l] + [
+            "nest " + str(i) for i in range(self.nestspec.num_nests - 1)
+        ]
 
         super().__init__(data, param_names, casadi_function_opts)
 
@@ -220,13 +240,17 @@ class NestedLogitModel(ModelBase):
         nestsets = [set() for _ in self.nestspec.nodes]
         for i in range(self.nestspec.num_classes + 1):
             nestsets[i].add(self.nestspec.nodes[i].name)
-        for i in range(self.nestspec.num_classes + 1,
-                       len(self.nestspec.nodes)):
-            nestsets[i] = \
-                set().union(*[nestsets[child.i]
-                              for child in self.nestspec.nodes[i].children])
+        for i in range(
+            self.nestspec.num_classes + 1, len(self.nestspec.nodes)
+        ):
+            nestsets[i] = set().union(
+                *[
+                    nestsets[child.i]
+                    for child in self.nestspec.nodes[i].children
+                ]
+            )
 
-        utilities = [0. for i in range(len(self.nestspec.nodes))]
+        utilities = [0.0 for i in range(len(self.nestspec.nodes))]
         for i in range(len(self.params)):
             for exog_name, pclass_names in self.params_l[i][1].items():
                 if exog_name is None:
@@ -255,7 +279,7 @@ class NestedLogitModel(ModelBase):
                     av_var = True
                 else:
                     av_var = exog_row[self.exog_name_to_i[av_exog_name]]
-            count = 0.
+            count = 0.0
             if class_name in self.classes:
                 endog_name = self.classes[class_name]
                 count = endog_row[self.endog_name_to_i[endog_name]]
@@ -265,9 +289,9 @@ class NestedLogitModel(ModelBase):
         self.nestspec.set_nest_data()
 
     def _loglike_casadi_sym(self):
-        params = ad.SX.sym('p', self.num_params)
-        endog_row = ad.SX.sym('y', self.endog_shape[1])
-        exog_row = ad.SX.sym('x', self.exog_shape[1])
+        params = ad.SX.sym("p", self.num_params)
+        endog_row = ad.SX.sym("y", self.endog_shape[1])
+        exog_row = ad.SX.sym("x", self.exog_shape[1])
         self.load_nestspec(params, endog_row, exog_row)
 
         f = self.nestspec.loglike()
@@ -276,8 +300,8 @@ class NestedLogitModel(ModelBase):
 
     @cached_value
     def _probs_casadi(self):
-        params = ad.SX.sym('p', self.num_params)
-        exog_row = ad.SX.sym('x', self.exog_shape[1])
+        params = ad.SX.sym("p", self.num_params)
+        exog_row = ad.SX.sym("x", self.exog_shape[1])
         self.load_nestspec(params, np.zeros(self.endog_shape[1]), exog_row)
 
         dout = {}
@@ -286,36 +310,40 @@ class NestedLogitModel(ModelBase):
             if endog_name in self.classes_r:
                 class_name = self.classes_r[endog_name]
                 if class_name in self.nestspec.class_name_to_i:
-                    dout[endog_name] = \
-                        self.nestspec.class_name_to_i[class_name]
+                    dout[endog_name] = self.nestspec.class_name_to_i[
+                        class_name
+                    ]
         dout_l = list(dout.items())
         probs_sym = ad.SX.zeros(len(dout_l))
         for i in range(len(dout_l)):
             probs_sym[i] = self.nestspec.get_prob(dout_l[i][1])
 
-        return (ad.Function('q', [params, exog_row], [probs_sym],
-                            self.casadi_function_opts),
-                [endog_name for endog_name, _ in dout_l])
+        return (
+            ad.Function(
+                "q", [params, exog_row], [probs_sym], self.casadi_function_opts
+            ),
+            [endog_name for endog_name, _ in dout_l],
+        )
 
     @property
     def endog_out_colnames(self):
         return self._probs_casadi[1]
 
-    def predict(self, params, exog, which='mean', total_counts=None):
+    def predict(self, params, exog, which="mean", total_counts=None):
         """
         Note: column names of output are given by endog_out_colnames.
         """
         exog = np.asarray(exog)
         if total_counts is None:
-            total_counts = np.broadcast_to(1., exog.shape[0])
+            total_counts = np.broadcast_to(1.0, exog.shape[0])
         total_counts = total_counts.squeeze()
         assert total_counts.shape == (exog.shape[0],)
         params = np.array(params)
         total_counts = total_counts[:, None]
         probs = np.array(self._probs_casadi[0](params, exog.T)).T
-        if which == 'mean':
+        if which == "mean":
             return total_counts * probs
-        elif which == 'var':
+        elif which == "var":
             return total_counts * probs * (1 - probs)
         raise ValueError("which must be 'mean' or 'var'")
 
@@ -327,30 +355,38 @@ class NestedLogitModel(ModelBase):
         """
         exog = np.asarray(exog)
         if total_counts is None:
-            total_counts = np.broadcast_to(1., exog.shape[0])
+            total_counts = np.broadcast_to(1.0, exog.shape[0])
         total_counts = total_counts.squeeze()
         probs = self.predict(params, exog)
         probs /= np.sum(probs, axis=1)[:, None] + 1e-14
         # TODO: numerical stability
         return random_multinomial(bitgen, total_counts, probs, exog.shape[0])
 
+    def _concat_vals(self, a, b):
+        av = np.full(len(self.params_l), a)
+        bv = np.full(self.nestspec.num_nests - 1, b)
+        return np.concatenate([av, bv])
+
     @cached_value
     def default_start_params(self):
-        return np.concatenate([np.zeros(len(self.params_l)),
-                               np.ones(self.nestspec.num_nests - 1)])
+        return self._concat_vals(0.0, 1.0)
 
     @cached_value
     def default_lbx(self):
-        return np.concatenate([np.full(len(self.params_l), -np.inf),
-                               np.full(self.nestspec.num_nests - 1, 0.1)])
+        return self._concat_vals(-np.inf, 0.1)
 
     @cached_value
     def default_ubx(self):
-        return np.concatenate([np.full(len(self.params_l), np.inf),
-                               np.ones(self.nestspec.num_nests - 1)])
+        return self._concat_vals(np.inf, 1.0)
 
-    def fit(self, start_params=None, lbx=None, ubx=None, constraints=None,
-            ipopt_options={}):
+    def fit(
+        self,
+        start_params=None,
+        lbx=None,
+        ubx=None,
+        constraints=None,
+        ipopt_options={},
+    ):
         if start_params is None:
             start_params = self.default_start_params
         if lbx is None:
@@ -361,7 +397,7 @@ class NestedLogitModel(ModelBase):
 
     def fit_null(self):
         # TODO: ACTUALLY DO PROPERLY
-        return self._fit_result(self.default_start_params, 'lol')
+        return self._fit_result(self.default_start_params, "lol")
 
 
 class CustomModelBaseResults(smd.DiscreteResults):
@@ -377,4 +413,3 @@ class CustomModelBaseResults(smd.DiscreteResults):
         result = super().summary()
         self.model.param_names_instead_of_exog_names = False
         return result
-
