@@ -15,9 +15,14 @@ from .nestspec import NestSpec
 
 
 class ModelBase:
-    def __init__(self, data, param_names, casadi_function_opts):
-        self.param_names = list(param_names)
+    def __init__(self, data, default_params_dict, casadi_function_opts):
+        self.param_names = list(default_params_dict)
         self.num_params = len(self.param_names)
+        self.default_start_params = np.array(
+            list(default_params_dict.values()), dtype=np.float64
+        )
+        self.default_lbx = np.full(self.num_params, -np.inf)
+        self.default_ubx = np.full(self.num_params, np.inf)
         self.casadi_function_opts = casadi_function_opts
         self.data = data
         self.exog_names_ = data.xnames()
@@ -40,6 +45,37 @@ class ModelBase:
         self.exog = np.broadcast_to(0.0, self.exog_shape)
         self.endog = np.broadcast_to(0.0, self.endog_shape)
         self.param_names_instead_of_exog_names = False
+
+    def params_arr(self, params, default_params=None):
+        """
+        If params is ndarray, returns flattened.
+        Otherwise, treats params as dict-like, and fills missing with defaults.
+        """
+        if default_params is None:
+            default_params = self.default_start_params
+        if default_params.shape != (self.num_params,):
+            raise ValueError(
+                "Invalid shape for default_params: default_params.shape "
+                f"({default_params.size}) != ({self.num_params},)"
+            )
+        if isinstance(params, np.ndarray):
+            params = params.flatten()
+            if len(params) != self.num_params:
+                raise ValueError(
+                    "Invalid size for params: params.size "
+                    f"({params.size}) != {self.num_params}"
+                )
+            return params
+        params_arr = default_params.copy()
+        for idx, name in zip(range(self.num_params), self.param_names):
+            try:
+                params_arr[idx] = params[name]
+            except KeyError:
+                pass
+        return params_arr
+
+    def params_dict(self, params):
+        return {self.param_names[i]: params[i] for i in range(self.num_params)}
 
     @property
     def exog_names(self):
@@ -80,6 +116,7 @@ class ModelBase:
         """
         Assumption: f output is column vector or scalar
         """
+        params = self.params_arr(params)
         if out is None:
             out = np.zeros(f.size_out(0)).squeeze()
         else:
@@ -128,7 +165,7 @@ class ModelBase:
         # any modification to results necessary?
         return results
 
-    def fit(self, start_params, lbx, ubx, constraints=None, ipopt_options={}):
+    def fit(self, start_params, lbx, ubx, ipopt_options={}):
         """
         lbx is lower bounds on parameters, ubx is upper bounds.
         """
@@ -143,7 +180,6 @@ class ModelBase:
             def gradient(self, params):
                 return -self.model.score(params)
 
-            # TODO: CONSTRAINTS
             def constraints(self, params):
                 return np.empty(0)
 
@@ -171,14 +207,14 @@ class ModelBase:
             n=self.num_params,
             m=0,
             problem_obj=LoglikeSpec(self),
-            lb=np.array(lbx),
-            ub=np.array(ubx),
+            lb=self.params_arr(lbx, self.default_lbx),
+            ub=self.params_arr(ubx, self.default_ubx),
             cl=np.empty(0),
             cu=np.empty(0),
         )
         for key, value in ipopt_options.items():
             nlp.add_option(key, value)
-        p_opt, info = nlp.solve(start_params.copy())
+        p_opt, info = nlp.solve(self.params_arr(start_params).copy())
         return self._fit_result(np.array(p_opt).flatten(), info["status_msg"])
 
     def fit_null(self):
@@ -225,11 +261,23 @@ class NestedLogitModel(ModelBase):
             self.classes[class_name]: class_name for class_name in self.classes
         }
         self.params_l = list(self.params.items())
-        param_names = [param_name for param_name, _ in self.params_l] + [
-            "nest " + str(i) for i in range(self.nestspec.num_nests - 1)
-        ]
 
-        super().__init__(data, param_names, casadi_function_opts)
+        default_params_dict = {
+            **{param_name: 0 for param_name, _ in self.params_l},
+            **{
+                "nest_" + str(i): 1 for i in range(self.nestspec.num_nests - 1)
+            },
+        }
+
+        super().__init__(data, default_params_dict, casadi_function_opts)
+
+        self.default_lbx = self._concat_vals(-np.inf, 0.1)
+        self.default_ubx = self._concat_vals(np.inf, 1.0)
+
+    def _concat_vals(self, a, b):
+        av = np.full(len(self.params_l), a)
+        bv = np.full(self.nestspec.num_nests - 1, b)
+        return np.concatenate([av, bv])
 
     def load_nestspec(self, params, endog_row, exog_row):
         """
@@ -338,7 +386,7 @@ class NestedLogitModel(ModelBase):
             total_counts = np.broadcast_to(1.0, exog.shape[0])
         total_counts = total_counts.squeeze()
         assert total_counts.shape == (exog.shape[0],)
-        params = np.array(params)
+        params = self.params_arr(params)
         total_counts = total_counts[:, None]
         probs = np.array(self._probs_casadi[0](params, exog.T)).T
         if which == "mean":
@@ -362,38 +410,8 @@ class NestedLogitModel(ModelBase):
         # TODO: numerical stability
         return random_multinomial(bitgen, total_counts, probs, exog.shape[0])
 
-    def _concat_vals(self, a, b):
-        av = np.full(len(self.params_l), a)
-        bv = np.full(self.nestspec.num_nests - 1, b)
-        return np.concatenate([av, bv])
-
-    @cached_value
-    def default_start_params(self):
-        return self._concat_vals(0.0, 1.0)
-
-    @cached_value
-    def default_lbx(self):
-        return self._concat_vals(-np.inf, 0.1)
-
-    @cached_value
-    def default_ubx(self):
-        return self._concat_vals(np.inf, 1.0)
-
-    def fit(
-        self,
-        start_params=None,
-        lbx=None,
-        ubx=None,
-        constraints=None,
-        ipopt_options={},
-    ):
-        if start_params is None:
-            start_params = self.default_start_params
-        if lbx is None:
-            lbx = self.default_lbx
-        if ubx is None:
-            ubx = self.default_ubx
-        return super().fit(start_params, lbx, ubx, constraints, ipopt_options)
+    def fit(self, start_params={}, lbx={}, ubx={}, ipopt_options={}):
+        return super().fit(start_params, lbx, ubx, ipopt_options)
 
     def fit_null(self):
         # TODO: ACTUALLY DO PROPERLY

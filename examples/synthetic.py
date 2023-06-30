@@ -71,10 +71,16 @@ def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
 model = init_model(
     endog, exog, vary_price_sens=False, include_intercept_a=True
 )
-### data generation is here: TODO: params as dict
+### data generation is here:
 endog_arr = model.generate_endog(
     bitgen,
-    [1.0, 2.0, 3.0, 0.01, 0.6],
+    {
+        "intercept_a": 1.0,
+        "intercept_b": 2.0,
+        "intercept_c": 3.0,
+        "price_sensitivity": 0.01,
+        "nest_0": 0.6,
+    },
     exog,
     total_counts=bitgen.integers(200, 400, n_samples),
 )
