@@ -1,12 +1,13 @@
 import casadi as ad
 import numpy as np
+import warnings
 
 from .util import ad_logsumexp
 
 
 class NestNode:
     parent = None  # means root
-    children = []  # empty means leaf
+    children = None  # empty means leaf
 
     # for a nest, this is the "utility" before exponentiating nest mod
     utility = 0.0
@@ -19,20 +20,24 @@ class NestNode:
     # they do not exist, it is just p for leafs, and is 0 for root node.
     nest_mod = 1.0
 
-    # leaf-only:
-    name = 0  # class name
-    count = 0  # from endog
+    name = None  # class name
+    count = 0.0  # from endog (for leaves; for nests it's sum of children)
+
     # nest-only:
     utility_extra = 0.0  # utility from exog vals for the nest, if any
 
-    def __init__(self, a=[]):
-        if isinstance(a, str):
-            self.name = a
-        else:
-            try:
-                self.children = list(a)
-            except TypeError:
-                self.name = a
+    def __init__(self, name=None, children=[]):
+        self.name = name
+        self.children = list(children)
+
+    def __repr__(self):
+        return "NestNode(" + ", ".join(
+            [
+                f"{f}={getattr(self, f)}"
+                for f in NestNode.__dict__
+                if not f.startswith("__")
+            ]
+        )
 
 
 class NestSpec:
@@ -41,76 +46,92 @@ class NestSpec:
     """
 
     def _basic_init(self):
-        self.root = NestNode([NestNode(0)])  # root node
-        self.nodes = [self.root.children[0], self.root]
-        self.class_name_to_i = {0: 0}
-        self.num_classes = 0  # null class not included
+        self.root = NestNode()
+        self.nodes = [self.root]
+        self.name_to_node = {None: self.root}
+        self.num_classes = 0
         self.num_nests = 1  # just the root
 
     def _finish_init(self):
-        def act_on_node(node, parent, lst):
+        def act_on_node(node, parent):
             node.parent = parent
-            if node.children:
-                toret = 1
-                for child in node.children:
-                    toret += act_on_node(child, node, lst)
-                return toret
-            lst.append(node)
-            return 0
+            if node.count:
+                raise ValueError(
+                    f"{node.name} found in multiple nests or part of a cycle"
+                )
+            node.count = 1  # temp mark
+            if len(node.children) == 1:
+                warnings.warn(f"{node.children[0].name} has no siblings")
+            for child in node.children:
+                act_on_node(child, node)
 
-        self.nodes = []
-        self.num_nests = act_on_node(self.root, None, self.nodes)
-        # null class node is first because of how nodes are added to root
-        class_names = [leaf.name for leaf in self.nodes[1:]]
-        self.num_classes = len(class_names)
-        if len(set(class_names)) != len(class_names):
-            print(class_names)
-            raise ValueError("Same class in multiple nests")
-        for i in range(1, len(self.nodes)):
-            self.nodes[i].i = i
-            self.class_name_to_i[self.nodes[i].name] = i
-        i = 0
-        seen = set()
-        # this way, nodes on the same level end up together
-        nodesr = [self.root]
-        while i < len(nodesr):
-            for child in reversed(nodesr[i].children):
-                if child.children and id(child) not in seen:
-                    nodesr.append(child)
-                    seen.add(id(child))
-            i += 1
-        self.nodes += reversed(nodesr)
-        for i in range(self.num_classes + 1, len(self.nodes)):
+        act_on_node(self.root, None)
+        for i in range(len(self.nodes)):
+            self.nodes[i].count = 0.0
             self.nodes[i].i = i
 
     def __init__(self):
         self._basic_init()
         self._finish_init()
 
-    def __init__(self, lst, null_class_name=0):
-        """
-        Expects nests to be represented as iterables in an iterable.
-        Example: lst = [[2, 4], [[3, 6], 1], 5]
-        """
+    def _add_node(self, node):
+        """Literally only for __init__"""
+        self.nodes.append(node)
+        self.name_to_node[node.name] = node
 
-        def set_node_to_list(node, lst):
-            if isinstance(lst, str):
-                node.name = lst
-            else:
-                try:
-                    for ele in lst:
-                        node.children.append(NestNode())
-                        set_node_to_list(node.children[-1], ele)
-                except TypeError:
-                    node.name = lst
-
-        for lst_needs_to_be_an_iterable in lst:
-            pass
-        if isinstance(lst, str):
-            raise ValueError("lst needs to be an iterable other than str")
+    def __init__(self, nests_dict, class_names):
+        """
+        nests_dict: same format as nests as passed to NestedLogitModel
+        class_names: self-explanatory
+        """
         self._basic_init()
-        self.root.children[0].name = null_class_name
-        set_node_to_list(self.root, lst)
+        self.num_classes = len(class_names)
+        self.num_nests = len(nests_dict) + 1  # for the root
+
+        self.nodes = []  # so we can put root at the end lol
+        for name in class_names:
+            if not isinstance(name, str) and not isinstance(name, int):
+                raise ValueError(
+                    f"{name} has invalid type for class name "
+                    "(is not str or int)"
+                )
+            self._add_node(NestNode(name=name))
+        s_class_names = set(class_names)
+        if len(s_class_names) != len(class_names):
+            raise ValueError("Duplicates in class_names")
+        free_classes = {n: None for n in class_names}  # for ordering
+        for name, child_names in nests_dict.items():
+            if not isinstance(name, str):
+                raise ValueError(
+                    f"{name} has invalid type for nest name (is not str)"
+                )
+            if name in s_class_names:
+                raise ValueError(
+                    f"{name} was listed as a nest name and a class name"
+                )
+            child_names = list(child_names)
+            if not child_names:
+                raise ValueError(f"{name} has no children")
+            self._add_node(NestNode(name=name, children=child_names))
+            for child in child_names:
+                if child in s_class_names:
+                    del free_classes[child]
+        self.root.children = list(free_classes) + list(nests_dict)
+        self._add_node(self.root)
+
+        # now replace our names with actual nodes in our children lists
+        for i in range(self.num_classes, len(self.nodes)):
+            node = self.nodes[i]
+            for j in range(len(node.children)):
+                name = node.children[j]
+                if not isinstance(name, str) and not isinstance(name, int):
+                    raise ValueError(
+                        f"{name} has invalid type for class/nest name "
+                        "(is not str or int)"
+                    )
+                if name not in self.name_to_node:
+                    raise ValueError(f"{name} not found in nests or classes")
+                node.children[j] = self.name_to_node[name]
         self._finish_init()
 
     def clear_data(self):
@@ -128,30 +149,29 @@ class NestSpec:
     def set_utility_extra_on_nesti(self, i, utility_extra):
         self.nodes[i].utility_extra = utility_extra
 
-    def set_nest_mods(self, arr, voff):
+    def set_nest_mods(self, arr):
         """
-        voff is offset in arr (arr[voff] is mod for first nest).
+        arr is aligned against self.nodes so arr[0] is mod for first nest
         """
-        # set so that arr[num_classes + 1 - voff] is mod for first nest.
-        voff = self.num_classes + 1 - voff
+        off = self.num_classes
 
-        self.nodes[0].nest_mod = 1.0
         self.root.nest_mod = 0.0
-        for i in range(1, len(self.nodes) - 1):
-            if self.nodes[i].parent != self.root:
-                if i > self.num_classes:
-                    self.nodes[i].nest_mod = (
-                        arr[i - voff] / arr[self.nodes[i].parent.i - voff]
-                    )
+        for i in range(len(self.nodes) - 1):
+            node = self.nodes[i]
+            if node.parent != self.root:
+                if node.children:
+                    node.nest_mod = arr[i - off] / arr[node.parent.i - off]
                 else:
-                    self.nodes[i].nest_mod = arr[self.nodes[i].parent.i - voff]
+                    node.nest_mod = arr[node.parent.i - off]
             else:
-                if i > self.num_classes:
-                    self.nodes[i].nest_mod = arr[i - voff]
+                if node.children:
+                    node.nest_mod = arr[i - off]
                 else:
-                    self.nodes[i].nest_mod = 1.0
+                    node.nest_mod = 1.0
 
-    def set_nest_data(self):
+    def eval_nest_data(self):
+        """Evaluates .utility, .count, and .is_valid of all nest nodes."""
+
         def handle_node(node):
             if node.children:
                 node.count = 0
@@ -167,8 +187,7 @@ class NestSpec:
                 for i in range(len(ul)):
                     u[i] = ul[i][1]
                     z[i] = ul[i][0]
-                # for z = 0,1, equivalent to logsumexp(log(z) + u)
-                node.utility = 1.0 + ad_logsumexp(-1.0 / z + u)
+                node.utility = ad_logsumexp(ad.log(z) + u)
                 node.is_valid = 1.0 - m_is_valid
                 toret = node.utility * node.nest_mod
                 return node.is_valid, toret + node.utility_extra
@@ -177,6 +196,14 @@ class NestSpec:
         handle_node(self.root)
 
     def loglike(self):
+        """
+        Before using loglike or get_prob:
+        - call clear_data (if necessary)
+        - call set_data_on_classi for each
+        - call set_utility_extra_on_nesti for each
+        - call set_nest_mods
+        - then call eval_nest_data (which uses all the above)
+        """
         toret = 0
         for node in self.nodes:
             if node.children:

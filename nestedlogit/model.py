@@ -1,9 +1,8 @@
 import casadi as ad
 import cyipopt
 import numpy as np
-import scipy.linalg
-import scipy.sparse
-import scipy.special
+import pandas as pd
+import scipy
 
 import statsmodels.base.model as smm
 import statsmodels.discrete.discrete_model as smd
@@ -66,6 +65,10 @@ class ModelBase:
                     f"({params.size}) != {self.num_params}"
                 )
             return params
+
+        for name in params:
+            if name not in self.param_names:
+                warnings.warn(f"Invalid param name {name}")
         params_arr = default_params.copy()
         for idx, name in zip(range(self.num_params), self.param_names):
             try:
@@ -232,109 +235,141 @@ class NestedLogitModel(ModelBase):
     def __init__(
         self,
         data,
-        classes,
-        nests,
-        availability_vars,
-        params,
-        casadi_function_opts,
+        classes=None,
+        nests={},
+        availability_vars={},
+        coefficients={},
+        nest_params={},
+        casadi_function_opts={},  # TODO: SET DECENT DEFAULT
     ):
         """
-        classes: dict, each entry is (class_name: endog_name),
-            where the null class has a class_name of 0.
-        nests: List of lists, to be passed to NestSpec.
-        availability_vars: dict, each entry is (class_name: exog_name).
-            If exog_name is None, assume said class is always available
-            If exog_name is missing, assume said class is never available
-        params: dict, each entry is (name: spec), where spec is a dict
-            where each entry is (exog_name: class_names).
-            exog_name is None means intercept
+        - classes: dict, each entry is (class_name: endog_name).
+          - If this is None, uses {n: n for n in endog_name_list} by default.
+        - nests: dict, each entry is (nest_name: class_or_nest_names).
+        - availability_vars: dict, each entry is (class_name: exog_name).
+            If exog_name is missing, assume said class is always available
+        - coefficients: dict, each entry is (coef_name: spec), where spec is a
+            dict where each entry is (exog_name: class_or_nest_names).
+          - The classes the (coef_name*exog_name) term applies to will then be
+            all the classes in the given class_or_nest_names plus all the
+            classes in the nests in class_or_nest_names.
+          - exog_name is None means intercept.
+          - Note that if some class does not have any terms specified to apply
+            to it, it will have a utility of 0 by default.
+        - nest_params: dict, each entry is (nest_param_name: nest_names). If a
+            nest is not found among nest_params.values(), it will
+            automatically get a nest_param with the same name as itself. Thus,
+            using nest_params={} generates an independent param for each nest.
 
-        Note that as of Python 3.7, dicts are ordered
+        Note that dicts are ordered (since we're in Python 3.7+)
         """
+        if classes is None:
+            classes = {n: n for n in data.ynames()}
         # TODO: ERROR CHECKING
         self.classes = dict(classes)
-        self.nestspec = NestSpec(nests)
+        self.nests = dict(nests)
+        self.nestspec = NestSpec(self.nests, list(self.classes))
         self.availability_vars = dict(availability_vars)
-        self.params = dict(params)
+        self.coefs = dict(coefficients)
+        self.nest_params = dict(nest_params)
+        self.nest_params = {
+            **{
+                n: [n]
+                for n in set(self.nests)
+                - set().union(*self.nest_params.values())
+            },
+            **self.nest_params,
+        }
 
         self.classes_r = {
             self.classes[class_name]: class_name for class_name in self.classes
         }
-        self.params_l = list(self.params.items())
+        self.coefs_l = list(self.coefs.items())
 
         default_params_dict = {
-            **{param_name: 0 for param_name, _ in self.params_l},
-            **{
-                "nest_" + str(i): 1 for i in range(self.nestspec.num_nests - 1)
-            },
+            **{coef_name: 0 for coef_name, _ in self.coefs_l},
+            **{nparam_name: 1 for nparam_name in self.nest_params},
         }
-
         super().__init__(data, default_params_dict, casadi_function_opts)
 
         self.default_lbx = self._concat_vals(-np.inf, 0.1)
         self.default_ubx = self._concat_vals(np.inf, 1.0)
 
     def _concat_vals(self, a, b):
-        av = np.full(len(self.params_l), a)
-        bv = np.full(self.nestspec.num_nests - 1, b)
+        av = np.full(len(self.coefs_l), a)
+        bv = np.full(len(self.nest_params), b)
         return np.concatenate([av, bv])
 
     def load_nestspec(self, params, endog_row, exog_row):
         """
         Writes the utilities and nestmods into self.nestspec.
         """
-        self.nestspec.set_nest_mods(params, len(self.params))
+        self.nest_to_param_i = {
+            nest: i
+            for i, nest_names in zip(
+                range(len(self.coefs_l), self.num_params),
+                self.nest_params.values(),
+            )
+            for nest in nest_names
+        }
+        self.nestspec.set_nest_mods(
+            [params[self.nest_to_param_i[nest]] for nest in self.nests]
+        )
+
+        def write_nestsets(node, nestsets):
+            if node.children:
+                for child in node.children:
+                    nestsets[node.i] |= write_nestsets(child, nestsets)
+                return nestsets[node.i]
+            nestsets[node.i] = {node.name}
+            return nestsets[node.i]
 
         nestsets = [set() for _ in self.nestspec.nodes]
-        for i in range(self.nestspec.num_classes + 1):
-            nestsets[i].add(self.nestspec.nodes[i].name)
-        for i in range(
-            self.nestspec.num_classes + 1, len(self.nestspec.nodes)
-        ):
-            nestsets[i] = set().union(
-                *[
-                    nestsets[child.i]
-                    for child in self.nestspec.nodes[i].children
-                ]
-            )
+        write_nestsets(self.nestspec.root, nestsets)
 
-        utilities = [0.0 for i in range(len(self.nestspec.nodes))]
-        for i in range(len(self.params)):
-            for exog_name, pclass_names in self.params_l[i][1].items():
+        def write_nodes(nodei, class_names, nodes):
+            if nestsets[nodei].issubset(class_names):
+                nodes.append(nodei)
+                class_names -= nestsets[nodei]
+                if not class_names:
+                    return True
+            for child in self.nestspec.nodes[nodei].children:
+                if write_nodes(child.i, class_names, nodes):
+                    return True
+            return False
+
+        utilities = [0.0 for _ in self.nestspec.nodes]
+        for i in range(len(self.coefs_l)):
+            for exog_name, names_raw in self.coefs_l[i][1].items():
                 if exog_name is None:
                     term = params[i]
                 else:
                     ind = self.exog_name_to_i[exog_name]
                     term = params[i] * exog_row[ind]
-                class_names = set(pclass_names)
+                class_names = set().union(
+                    *[
+                        nestsets[self.nestspec.name_to_node[n].i]
+                        for n in names_raw
+                    ]
+                )
                 nodes = []
-                for j in range(len(nestsets) - 1, 0, -1):
-                    if nestsets[j].issubset(class_names):
-                        nodes.append(j)
-                        class_names -= nestsets[j]
-                        if not class_names:
-                            break
+                write_nodes(self.nestspec.root.i, class_names, nodes)
                 for nodei in nodes:
                     utilities[nodei] += term
 
         self.nestspec.clear_data()
-        for j in range(self.nestspec.num_classes + 1):
+        for j in range(self.nestspec.num_classes):
             class_name = self.nestspec.nodes[j].name
-            av_var = False
+            av_var = True
             if class_name in self.availability_vars:
                 av_exog_name = self.availability_vars[class_name]
-                if av_exog_name is None:
-                    av_var = True
-                else:
-                    av_var = exog_row[self.exog_name_to_i[av_exog_name]]
-            count = 0.0
-            if class_name in self.classes:
-                endog_name = self.classes[class_name]
-                count = endog_row[self.endog_name_to_i[endog_name]]
+                av_var = exog_row[self.exog_name_to_i[av_exog_name]]
+            endog_name = self.classes[class_name]
+            count = endog_row[self.endog_name_to_i[endog_name]]
             self.nestspec.set_data_on_classi(j, utilities[j], count, av_var)
-        for j in range(self.nestspec.num_classes + 1, len(nestsets)):
+        for j in range(self.nestspec.num_classes, len(nestsets)):
             self.nestspec.set_utility_extra_on_nesti(j, utilities[j])
-        self.nestspec.set_nest_data()
+        self.nestspec.eval_nest_data()
 
     def _loglike_casadi_sym(self):
         params = ad.SX.sym("p", self.num_params)
@@ -352,30 +387,23 @@ class NestedLogitModel(ModelBase):
         exog_row = ad.SX.sym("x", self.exog_shape[1])
         self.load_nestspec(params, np.zeros(self.endog_shape[1]), exog_row)
 
-        dout = {}
+        dout = []
         # so the order is same as in endog
         for endog_name in self.endog_names:
             if endog_name in self.classes_r:
                 class_name = self.classes_r[endog_name]
-                if class_name in self.nestspec.class_name_to_i:
-                    dout[endog_name] = self.nestspec.class_name_to_i[
-                        class_name
-                    ]
-        dout_l = list(dout.items())
-        probs_sym = ad.SX.zeros(len(dout_l))
-        for i in range(len(dout_l)):
-            probs_sym[i] = self.nestspec.get_prob(dout_l[i][1])
+                node = self.nestspec.name_to_node[class_name]
+                dout.append((endog_name, node.i))
+        probs_sym = ad.SX.zeros(len(dout))
+        for i in range(len(dout)):
+            probs_sym[i] = self.nestspec.get_prob(dout[i][1])
 
         return (
             ad.Function(
                 "q", [params, exog_row], [probs_sym], self.casadi_function_opts
             ),
-            [endog_name for endog_name, _ in dout_l],
+            [endog_name for endog_name, _ in dout],
         )
-
-    @property
-    def endog_out_colnames(self):
-        return self._probs_casadi[1]
 
     def predict(self, params, exog, which="mean", total_counts=None):
         """
@@ -388,11 +416,14 @@ class NestedLogitModel(ModelBase):
         assert total_counts.shape == (exog.shape[0],)
         params = self.params_arr(params)
         total_counts = total_counts[:, None]
-        probs = np.array(self._probs_casadi[0](params, exog.T)).T
+        probs_func, columns = self._probs_casadi
+        probs = np.array(probs_func(params, exog.T)).T
         if which == "mean":
-            return total_counts * probs
+            return pd.DataFrame(total_counts * probs, columns=columns)
         elif which == "var":
-            return total_counts * probs * (1 - probs)
+            return pd.DataFrame(
+                total_counts * probs * (1 - probs), columns=columns
+            )
         raise ValueError("which must be 'mean' or 'var'")
 
     def generate_endog(self, bitgen, params, exog, total_counts=None):
@@ -405,10 +436,11 @@ class NestedLogitModel(ModelBase):
         if total_counts is None:
             total_counts = np.broadcast_to(1.0, exog.shape[0])
         total_counts = total_counts.squeeze()
-        probs = self.predict(params, exog)
+        probs = np.asarray(self.predict(params, exog))
         probs /= np.sum(probs, axis=1)[:, None] + 1e-14
         # TODO: numerical stability
-        return random_multinomial(bitgen, total_counts, probs, exog.shape[0])
+        res = random_multinomial(bitgen, total_counts, probs, exog.shape[0])
+        return pd.DataFrame(res, columns=self._probs_casadi[1])
 
     def fit(self, start_params={}, lbx={}, ubx={}, ipopt_options={}):
         return super().fit(start_params, lbx, ubx, ipopt_options)

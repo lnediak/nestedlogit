@@ -15,12 +15,12 @@ exog = pd.DataFrame(
         "nop_available": np.ones(n_samples),
     }
 )
+classes = ["a", "b", "c"]
+all_classes = ["nop"] + classes
 endog = pd.DataFrame(
     np.broadcast_to(np.zeros(1), (n_samples, 4)),
-    columns=["none_count", "a_count", "b_count", "c_count"],
+    columns=all_classes,
 )
-
-classes = ["a", "b", "c"]
 
 casadi_function_opts = {
     "jit": True,
@@ -32,20 +32,9 @@ casadi_function_opts = {
 def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
     return nestedlogit.NestedLogitModel(
         nestedlogit.PandasModelData(endog, exog, 10000),
-        classes={
-            0: "none_count",
-            "a": "a_count",
-            "b": "b_count",
-            "c": "c_count",
-        },
-        nests=["c", ["a", "b"]],
-        availability_vars={
-            0: "nop_available",
-            "a": None,
-            "b": None,
-            "c": None,
-        },
-        params={
+        nests={"nest_ab": ["a", "b"]},
+        availability_vars={"nop": "nop_available"},
+        coefficients={
             **({"intercept_a": {None: ["a"]}} if include_intercept_a else {}),
             "intercept_b": {None: ["b"]},
             "intercept_c": {None: ["c"]},
@@ -72,19 +61,18 @@ model = init_model(
     endog, exog, vary_price_sens=False, include_intercept_a=True
 )
 ### data generation is here:
-endog_arr = model.generate_endog(
+endog = model.generate_endog(
     bitgen,
     {
         "intercept_a": 1.0,
         "intercept_b": 2.0,
         "intercept_c": 3.0,
         "price_sensitivity": 0.01,
-        "nest_0": 0.6,
+        "nest_ab": 0.6,
     },
     exog,
     total_counts=bitgen.integers(200, 400, n_samples),
 )
-endog = pd.DataFrame(endog_arr, columns=model.endog_out_colnames)
 
 # --- results
 

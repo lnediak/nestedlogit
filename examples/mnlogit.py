@@ -40,9 +40,7 @@ casadi_function_opts = {
 nmodel = nestedlogit.NestedLogitModel(
     nestedlogit.NdarrayModelData(yy, X),
     classes={i: "y" + str(i + 1) for i in range(nc)},
-    nests=list(range(1, nc)),
-    availability_vars={i: None for i in range(nc)},
-    params={
+    coefficients={
         str(i) + "_" + str(j): {"x" + str(j + 1): [i]}
         for i in range(1, nc)
         for j in range(nf)
