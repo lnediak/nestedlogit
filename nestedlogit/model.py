@@ -1,16 +1,13 @@
 import casadi as ad
 import cyipopt
+from functools import cached_property
 import numpy as np
 import pandas as pd
 import scipy
 
-import statsmodels.base.model as smm
-import statsmodels.discrete.discrete_model as smd
-from statsmodels.tools.decorators import cached_value, cache_readonly
-
-
 from .util import random_multinomial
 from .nestspec import NestSpec
+from .results import ModelResults
 
 
 class ModelBase:
@@ -24,7 +21,7 @@ class ModelBase:
         self.default_ubx = np.full(self.num_params, np.inf)
         self.casadi_function_opts = casadi_function_opts
         self.data = data
-        self.exog_names_ = data.xnames()
+        self.exog_names = data.xnames()
         self.endog_names = data.ynames()
         self.exog_shape = data.exog_shape
         self.endog_shape = data.endog_shape
@@ -35,15 +32,7 @@ class ModelBase:
         self.endog_name_to_i = {
             self.endog_names[i]: i for i in range(len(self.endog_names))
         }
-        # TODO: FIGURE OUT WHAT THE HELL TO DO WITH df_model and k_extra
-        self.k_extra = 0
-        self.df_model = self.num_params
-        self.df_resid = self.nobs - self.df_model
-
-        # --- statsmodels results compatibility:
-        self.exog = np.broadcast_to(0.0, self.exog_shape)
-        self.endog = np.broadcast_to(0.0, self.endog_shape)
-        self.param_names_instead_of_exog_names = False
+        self.df_resid = self.nobs - self.num_params
 
     def params_arr(self, params, default_params=None):
         """
@@ -80,16 +69,6 @@ class ModelBase:
     def params_dict(self, params):
         return {self.param_names[i]: params[i] for i in range(self.num_params)}
 
-    @property
-    def exog_names(self):
-        """
-        self.param_names_instead_of_exog_names exists because statsmodels
-        summary uses exog_names for names instead of params.
-        """
-        if getattr(self, "param_names_instead_of_exog_names", False):
-            return self.param_names
-        return self.exog_names_
-
     def _loglike_casadi_sym(self):
         """
         Returns (params,endog,exog,f,g,H). params, f, g, and H are SX.
@@ -98,7 +77,7 @@ class ModelBase:
         """
         raise NotImplementedError
 
-    @cached_value
+    @cached_property
     def _loglike_casadi_funcs(self):
         p, y, x, f, g, H = self._loglike_casadi_sym()
         H = ad.tril(H)
@@ -160,13 +139,7 @@ class ModelBase:
             print("Information matrix:", -Hval)
             print("Eigenvalues:", scipy.linalg.eigh(-Hval)[0])
             raise
-        # TODO: OTHER OPTIONS
-        mlefit = smm.LikelihoodModelResults(self, params, Hinv, scale=1.0)
-        mlefit.mle_retvals = {"converged": convergence_msg}
-
-        results = CustomModelBaseResults(self, mlefit)
-        # any modification to results necessary?
-        return results
+        return ModelResults(self, params, Hinv)
 
     def fit(self, start_params, lbx, ubx, ipopt_options={}):
         """
@@ -228,9 +201,7 @@ class ModelBase:
 
 
 class NestedLogitModel(ModelBase):
-    """
-    Nested Logit model.
-    """
+    """Nested Logit model."""
 
     def __init__(
         self,
@@ -381,7 +352,7 @@ class NestedLogitModel(ModelBase):
         H, g = ad.hessian(f, params)
         return params, endog_row, exog_row, f, g, H
 
-    @cached_value
+    @cached_property
     def _probs_casadi(self):
         params = ad.SX.sym("p", self.num_params)
         exog_row = ad.SX.sym("x", self.exog_shape[1])
@@ -446,20 +417,12 @@ class NestedLogitModel(ModelBase):
         return super().fit(start_params, lbx, ubx, ipopt_options)
 
     def fit_null(self):
-        # TODO: ACTUALLY DO PROPERLY
-        return self._fit_result(self.default_start_params, "lol")
-
-
-class CustomModelBaseResults(smd.DiscreteResults):
-    @cache_readonly
-    def llnull(self):
-        """
-        For McFadden's pseudo-R^2
-        """
-        return self.model.fit_null().llf
-
-    def summary(self):
-        self.model.param_names_instead_of_exog_names = True
-        result = super().summary()
-        self.model.param_names_instead_of_exog_names = False
-        return result
+        model = NestedLogitModel(
+            self.data,
+            classes=self.classes,
+            availability_vars=self.availability_vars,
+            coefficients={
+                cls: {None: [cls]} for cls in list(self.classes)[1:]
+            },
+        )
+        return model.fit()

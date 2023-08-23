@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="nestedlogit",
-    version="0.1",
+    version="0.0",
     description="TODO",
     url="https://github.com/lnediak/nestedlogit",
     author="lnediak",
@@ -16,6 +16,5 @@ setup(
         "numpy",
         "pandas",
         "scipy",
-        "statsmodels",
     ],
 )
