@@ -21,16 +21,10 @@ class ModelBase:
         self.default_ubx = np.full(self.num_params, np.inf)
         self.casadi_function_opts = casadi_function_opts
         self.data = data
-        self.exog_names = data.xnames()
-        self.endog_names = data.ynames()
-        self.exog_shape = data.exog_shape
-        self.endog_shape = data.endog_shape
+        self.data_names = data.columns
         self.nobs = data.nobs
-        self.exog_name_to_i = {
-            self.exog_names[i]: i for i in range(len(self.exog_names))
-        }
-        self.endog_name_to_i = {
-            self.endog_names[i]: i for i in range(len(self.endog_names))
+        self.data_name_to_i = {
+            self.data_names[i]: i for i in range(len(self.data_names))
         }
         self.df_resid = self.nobs - self.num_params
 
@@ -71,17 +65,17 @@ class ModelBase:
 
     def _loglike_casadi_sym(self):
         """
-        Returns (params,endog,exog,f,g,H). params, f, g, and H are SX.
+        Returns (params,data_row,f,g,H), all these being SX.
         Note that this should be calculated for a single row only, that is,
-        exog and endog should only have a single row.
+        data_row should only have a single row, f should be scalar.
         """
         raise NotImplementedError
 
     @cached_property
     def _loglike_casadi_funcs(self):
-        p, y, x, f, g, H = self._loglike_casadi_sym()
+        p, d, f, g, H = self._loglike_casadi_sym()
         H = ad.tril(H)
-        args = [p, y, x]
+        args = [p, d]
         return (
             ad.Function("f", args, [f], self.casadi_function_opts),
             ad.Function("g", args, [g], self.casadi_function_opts),
@@ -107,8 +101,9 @@ class ModelBase:
         out = np.atleast_1d(out.squeeze())
         for i in range(0, self.nobs, self.data.max_rows):
             nrows = min(self.data.max_rows, self.nobs - i)
-            endog, exog = self.data.get_endog_exog(i, i + nrows)
-            out[...] += np.sum(f(params, endog.T, exog.T).toarray(), axis=1)
+            data_rows = self.data.get_data(i, i + nrows)
+            # weird casadi calling convention
+            out[...] += np.sum(f(params, data_rows.T).toarray(), axis=1)
         return out.reshape(outshape)
 
     def loglike(self, params):
@@ -132,6 +127,7 @@ class ModelBase:
         return res if sparse_out else res.toarray()
 
     def _fit_result(self, params, convergence_msg):
+        # TODO: USE convergence_msg
         Hval = self.hessian(params)
         try:
             Hinv = scipy.linalg.inv(-Hval)
@@ -206,7 +202,7 @@ class NestedLogitModel(ModelBase):
     def __init__(
         self,
         data,
-        classes=None,
+        classes,
         nests={},
         availability_vars={},
         coefficients={},
@@ -215,7 +211,7 @@ class NestedLogitModel(ModelBase):
     ):
         """
         - classes: dict, each entry is (class_name: endog_name).
-          - If this is None, uses {n: n for n in endog_name_list} by default.
+          - If this is a list or tuple, uses {n: n for n in classes}.
         - nests: dict, each entry is (nest_name: class_or_nest_names).
         - availability_vars: dict, each entry is (class_name: exog_name).
             If exog_name is missing, assume said class is always available
@@ -234,8 +230,9 @@ class NestedLogitModel(ModelBase):
 
         Note that dicts are ordered (since we're in Python 3.7+)
         """
-        if classes is None:
-            classes = {n: n for n in data.ynames()}
+        # TODO: FORMULAS INSTEAD OF JUST NAMES
+        if isinstance(classes, (list, tuple)):
+            classes = {n: n for n in classes}
         # TODO: ERROR CHECKING
         self.classes = dict(classes)
         self.nests = dict(nests)
@@ -256,6 +253,11 @@ class NestedLogitModel(ModelBase):
             self.classes[class_name]: class_name for class_name in self.classes
         }
         self.coefs_l = list(self.coefs.items())
+        self.exog_names = [
+            n for _, v in self.coefs_l for n in v if n is not None
+        ]
+        self.exog_names.extend(self.availability_vars.values())
+        self.endog_names = list(self.classes_r)
 
         default_params_dict = {
             **{coef_name: 0 for coef_name, _ in self.coefs_l},
@@ -271,7 +273,7 @@ class NestedLogitModel(ModelBase):
         bv = np.full(len(self.nest_params), b)
         return np.concatenate([av, bv])
 
-    def load_nestspec(self, params, endog_row, exog_row):
+    def load_nestspec(self, params, data_row):
         """
         Writes the utilities and nestmods into self.nestspec.
         """
@@ -311,12 +313,12 @@ class NestedLogitModel(ModelBase):
 
         utilities = [0.0 for _ in self.nestspec.nodes]
         for i in range(len(self.coefs_l)):
-            for exog_name, names_raw in self.coefs_l[i][1].items():
-                if exog_name is None:
+            for data_name, names_raw in self.coefs_l[i][1].items():
+                if data_name is None:
                     term = params[i]
                 else:
-                    ind = self.exog_name_to_i[exog_name]
-                    term = params[i] * exog_row[ind]
+                    ind = self.data_name_to_i[data_name]
+                    term = params[i] * data_row[ind]
                 class_names = set().union(
                     *[
                         nestsets[self.nestspec.name_to_node[n].i]
@@ -333,10 +335,10 @@ class NestedLogitModel(ModelBase):
             class_name = self.nestspec.nodes[j].name
             av_var = True
             if class_name in self.availability_vars:
-                av_exog_name = self.availability_vars[class_name]
-                av_var = exog_row[self.exog_name_to_i[av_exog_name]]
+                av_data_name = self.availability_vars[class_name]
+                av_var = data_row[self.data_name_to_i[av_data_name]]
             endog_name = self.classes[class_name]
-            count = endog_row[self.endog_name_to_i[endog_name]]
+            count = data_row[self.data_name_to_i[endog_name]]
             self.nestspec.set_data_on_classi(j, utilities[j], count, av_var)
         for j in range(self.nestspec.num_classes, len(nestsets)):
             self.nestspec.set_utility_extra_on_nesti(j, utilities[j])
@@ -344,23 +346,26 @@ class NestedLogitModel(ModelBase):
 
     def _loglike_casadi_sym(self):
         params = ad.SX.sym("p", self.num_params)
-        endog_row = ad.SX.sym("y", self.endog_shape[1])
-        exog_row = ad.SX.sym("x", self.exog_shape[1])
-        self.load_nestspec(params, endog_row, exog_row)
+        data_row = ad.SX.sym("d", self.data.shape[1])
+        self.load_nestspec(params, data_row)
 
         f = self.nestspec.loglike()
         H, g = ad.hessian(f, params)
-        return params, endog_row, exog_row, f, g, H
+        return params, data_row, f, g, H
 
     @cached_property
     def _probs_casadi(self):
         params = ad.SX.sym("p", self.num_params)
-        exog_row = ad.SX.sym("x", self.exog_shape[1])
-        self.load_nestspec(params, np.zeros(self.endog_shape[1]), exog_row)
+        exog_row = ad.SX.sym("x", len(self.exog_names))
+        tmp = {self.exog_names[i]: i for i in range(len(self.exog_names))}
+        data_row = [
+            exog_row[tmp[n]] if n in tmp else 0.0 for n in self.data_names
+        ]
+        self.load_nestspec(params, data_row)
 
         dout = []
-        # so the order is same as in endog
-        for endog_name in self.endog_names:
+        # so the order is same as in data
+        for endog_name in self.data_names:
             if endog_name in self.classes_r:
                 class_name = self.classes_r[endog_name]
                 node = self.nestspec.name_to_node[class_name]
@@ -416,13 +421,14 @@ class NestedLogitModel(ModelBase):
     def fit(self, start_params={}, lbx={}, ubx={}, ipopt_options={}):
         return super().fit(start_params, lbx, ubx, ipopt_options)
 
-    def fit_null(self):
+    def fit_null(self, *args, **kwargs):
+        cols = list(self.availability_vars.values()) + self.endog_names
         model = NestedLogitModel(
-            self.data,
+            self.data.subdata(cols),
             classes=self.classes,
             availability_vars=self.availability_vars,
             coefficients={
                 cls: {None: [cls]} for cls in list(self.classes)[1:]
             },
         )
-        return model.fit()
+        return model.fit(*args, **kwargs)

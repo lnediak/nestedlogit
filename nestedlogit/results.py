@@ -25,9 +25,9 @@ class ModelResults:
 
         self.null_results = None
 
-    def use_fit_null(self):
+    def use_fit_null(self, *args, **kwargs):
         """Calculates the stuff based on the results of model.fit_null"""
-        self.null_results = self.model.fit_null()
+        self.null_results = self.model.fit_null(*args, **kwargs)
         self.llnull = self.null_results.llf
         self.llr = 2 * (self.llf - self.llnull)
         df = self.model.num_params - self.null_results.model.num_params
@@ -50,11 +50,11 @@ class ModelResults:
             ("No. Observations:", self.nobs),
             ("Df Residuals:", self.df_resid),
             ("Df Model:", self.num_params),
-            ("Log-Likelihood:", self.llf),
+            ("Log-Likelihood:", "%8.5g" % self.llf),
         ]
         if self.null_results is not None:
             null_res_info = [
-                ("Pseudo R-squ.:", self.prsquared),
+                ("Pseudo R-squ.:", "%#6.4g" % self.prsquared),
                 ("LL-Null:", "%#8.5g" % self.llnull),
                 ("LLR p-value:", "%#6.4g" % self.llr_pvalue),
             ]
@@ -69,7 +69,7 @@ class ModelResults:
             "std err",
             "z",
             "P>|z|",
-            f"[{alpha / 2}]",
+            f"[{alpha / 2}",
             f"{1 - alpha / 2}]",
         ]
         pnames = self.model.param_names

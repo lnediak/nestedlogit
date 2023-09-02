@@ -1,2 +1,2 @@
+from . import data
 from .model import NestedLogitModel
-from .data import NdarrayModelData, PandasModelData

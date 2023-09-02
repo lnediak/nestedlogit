@@ -38,16 +38,15 @@ casadi_function_opts = {
     "jit_options": {"compiler": "gcc", "flags": ["-O3"]},
 }
 nmodel = nestedlogit.NestedLogitModel(
-    nestedlogit.NdarrayModelData(yy, X),
-    classes={i: "y" + str(i + 1) for i in range(nc)},
+    nestedlogit.data.SimpleModelData((yy, X)),
+    classes={i: f"y{i}" for i in range(nc)},
     coefficients={
-        str(i) + "_" + str(j): {"x" + str(j + 1): [i]}
-        for i in range(1, nc)
-        for j in range(nf)
+        f"y{i}_x{j}": {f"x{j}": [i]} for i in range(1, nc) for j in range(nf)
     },
     casadi_function_opts=casadi_function_opts,
 )
 res = nmodel.fit(ipopt_options={"print_level": 2})
+res.use_fit_null(ipopt_options={"print_level": 0})
 
 print("nestedlogit.NestedLogitModel:")
 print(res.summary())

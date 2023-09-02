@@ -31,7 +31,8 @@ casadi_function_opts = {
 
 def init_model(endog, exog, vary_price_sens=False, include_intercept_a=False):
     return nestedlogit.NestedLogitModel(
-        nestedlogit.PandasModelData(endog, exog, 10000),
+        nestedlogit.data.SimpleModelData((endog, exog), max_rows=10000),
+        classes=all_classes,
         nests={"nest_ab": ["a", "b"]},
         availability_vars={"nop": "nop_available"},
         coefficients={
@@ -82,10 +83,12 @@ model = init_model(
     endog, exog, vary_price_sens=False, include_intercept_a=True
 )
 res = model.fit(ipopt_options={"print_level": 5})
+res.use_fit_null(ipopt_options={"print_level": 3})
 print(res.summary())
 
 model = init_model(endog, exog, vary_price_sens=True, include_intercept_a=True)
 res = model.fit(ipopt_options={"print_level": 5})
+res.use_fit_null(ipopt_options={"print_level": 3})
 print(res.summary())
 
 exog["nop_available"][:] = 0
@@ -95,10 +98,12 @@ model = init_model(
     endog, exog, vary_price_sens=False, include_intercept_a=False
 )
 res = model.fit(ipopt_options={"print_level": 5})
+res.use_fit_null(ipopt_options={"print_level": 3})
 print(res.summary())
 
 model = init_model(
     endog, exog, vary_price_sens=True, include_intercept_a=False
 )
 res = model.fit(ipopt_options={"print_level": 5})
+res.use_fit_null(ipopt_options={"print_level": 3})
 print(res.summary())

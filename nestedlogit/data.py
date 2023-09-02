@@ -1,211 +1,191 @@
+import abc
 import numpy as np
 import pandas as pd
 
 
-def generic_get_names(df, prefix="", default=None):
-    if isinstance(df, pd.DataFrame):
-        if isinstance(df.columns, pd.MultiIndex):
-            # flatten MultiIndex
-            return [
-                "_".join((level for level in c if level)) for c in df.columns
-            ]
-        return list(df.columns)
-    elif isinstance(df, pd.Series):
-        if arr.name:
-            return [arr.name]
-        return [prefix + "1"]
-    elif isinstance(df, np.ndarray):
-        return [prefix + str(i) for i in range(1, df.shape[1] + 1)]
-    try:
-        return list(df)
-    except TypeError:
-        pass
-    return default
+def to_dataframe(data):
+    """Sets df = pd.DataFrame(data), and then cleans up df.columns so it
+    is a list of unique strings (instead of a MultiIndex, being a generator,
+    containing ints or something else, or having duplicate column names).
+    """
+    df = pd.DataFrame(data)
+    if isinstance(df.columns, pd.MultiIndex):
+        cols = ["_".join(filter(None, map(str, c))) for c in df.columns]
+    else:
+        cols = list(map(str, df.columns))
+    counts = {c: (n, 0) for c, n in zip(*np.unique(cols, return_counts=True))}
+    for i in range(len(cols)):
+        c = cols[i]
+        if counts[c][0] > 1:
+            cols[i] = c + "_" + str(counts[c][1])
+            counts[c][1] += 1
+    df.columns = cols
+    return df
 
 
-class AbstractModelData:
-    endog_shape = NotImplemented
-    exog_shape = NotImplemented
+def yx_to_dataframe(data):
+    """Options for data:
+    - data is tuple containing (endog, exog): In this case, we initialize
+      endog and exog using to_dataframe. If the resulting column names
+      overlap, we prefix the exog column names with "x" and the endog
+      column names with "y". For example, if plain numpy arrays are given,
+      the column names end up being ["y0", "y1", ... , "x0", "x1", ...].
+    - data is anything else: We then initialize it by passing it through
+      to_dataframe.
+    """
+    if isinstance(data, tuple):
+        if len(data) != 2:
+            raise ValueError("data is tuple not of length 2")
+        endog = to_dataframe(data[0])
+        exog = to_dataframe(data[1])
+        df = pd.concat([endog, exog], axis=1, copy=False)
+        if set(endog.columns) & set(exog.columns):
+            ycols = ["y" + str(c) for c in endog.columns]
+            xcols = ["x" + str(c) for c in exog.columns]
+            df.columns = ycols + xcols
+        return df
+    return to_dataframe(data)
+
+
+class AbstractModelData(abc.ABC):
+    shape = NotImplemented
     nobs = NotImplemented
+    columns = NotImplemented
 
-    # this is the max # of rows that can be requested through get_endog_exog
-    max_rows = None
+    # this is the max # of rows that can be requested through get_data
+    max_rows = NotImplemented
 
-    def xnames(self):
-        """
-        Column names for exog. If not available, uses ['x1', ...] by default.
-        """
-        raise NotImplementedError
-
-    def ynames(self):
-        """
-        Column names for endog. If not available, uses ['y1', ...] by default.
-        """
-        raise NotImplementedError
-
-    def get_endog_exog(self, start, stop):
-        """
-        Returns the rows in (endog, exog) indexed by start:stop, as ndarray.
-        It is assumed that 0 <= start,stop <= self.nobs.
+    @abc.abstractmethod
+    def get_data(self, start, stop):
+        """Returns the rows indexed by start:stop, as ndarray. It is assumed
+        that 0 <= start, stop <= self.nobs and stop - start <= max_rows.
 
         Ideally this function should not allocate memory, and to allow that it
         can invalidate previous return values.
 
         Also note that this will only be called (by the model) in a sequence
         resulting in a sweep over the data (e.g. 0:100, 100:200, 200:300, etc),
-        possibly going through many times.
+        possibly going through multiple times.
         """
-        raise NotImplementedError
+        NotImplemented
+
+    @abc.abstractmethod
+    def subdata(self, colnames):
+        """Basically returns data.loc[:, colnames] as AbstractModelData, except
+        the order of columns in the result does not have to be the same.
+        """
+        NotImplemented
+
+    def _col_to_i(self):
+        return {self.columns[i]: i for i in range(len(self.columns))}
+
+    def _sorted_colnames(self, colnames, col_to_i=None):
+        col_to_i = self._col_to_i() if col_to_i is None else col_to_i
+        return sorted(map(str, colnames), key=lambda c: col_to_i[c])
 
 
-class NdarrayModelData(AbstractModelData):
-    def __init__(self, endog, exog, max_rows=None):
-        self.endog = np.atleast_2d(endog)
-        self.exog = np.atleast_2d(exog)
-        self.endog_shape = self.endog.shape
-        self.exog_shape = self.exog.shape
-        self.nobs = len(self.endog)
+class SimpleModelData(AbstractModelData):
+    def __init__(self, data, max_rows=None):
+        """data is passed through yx_to_dataframe"""
+        self.data = yx_to_dataframe(data)
+        if not self.data.size:
+            raise ValueError("data is empty")
+
+        self.shape = self.data.shape
+        self.columns = self.data.columns
+        self.nobs = len(self.data)
         if max_rows is None:
-            max_rows = len(self.endog)
+            max_rows = len(self.data)
         self.max_rows = max_rows
 
-        assert self.endog.ndim == self.exog.ndim == 2
-        assert len(self.endog) == len(self.exog)
-        assert self.endog.size and self.exog.size
+        self.scratch = np.empty((max_rows, self.shape[1]))
 
-    def xnames(self):
-        return generic_get_names(self.exog, prefix="x")
+    def get_data(self, start, stop):
+        self.scratch[: stop - start, :] = self.data.iloc[start:stop]
+        return self.scratch[: stop - start, :]
 
-    def ynames(self):
-        return generic_get_names(self.endog, prefix="y")
-
-    def get_endog_exog(self, start, stop):
-        return self.endog[start:stop, :], self.exog[start:stop, :]
-
-
-class PandasModelData(AbstractModelData):
-    def __init__(self, endog, exog, max_rows=None):
-        self.endog = endog
-        self.exog = exog
-        self.endog_shape = self.endog.shape
-        self.exog_shape = self.exog.shape
-        self.nobs = len(self.endog)
-        if max_rows is None:
-            max_rows = len(self.endog)
-        self.max_rows = max_rows
-
-        self.endog_scratch = np.empty((max_rows, self.endog_shape[1]))
-        self.exog_scratch = np.empty((max_rows, self.exog_shape[1]))
-
-        assert len(self.endog) == len(self.exog)
-        assert self.endog.size and self.exog.size
-
-    def xnames(self):
-        return generic_get_names(self.exog, prefix="x")
-
-    def ynames(self):
-        return generic_get_names(self.endog, prefix="y")
-
-    def get_endog_exog(self, start, stop):
-        self.endog_scratch[: stop - start, :] = self.endog.iloc[start:stop]
-        self.exog_scratch[: stop - start, :] = self.exog.iloc[start:stop]
-        return (
-            self.endog_scratch[: stop - start, :],
-            self.exog_scratch[: stop - start, :],
-        )
+    def subdata(self, colnames):
+        colnames_l = self._sorted_colnames(colnames)
+        if list(self.columns) == colnames_l:
+            return self
+        return SimpleModelData(self.data.loc[:, colnames_l], self.max_rows)
 
 
 class IndexedModelData(AbstractModelData):
     """
-    Here, exog = concatenate(
-              [tables[table_name].iloc[exog_inds[table_name], :]
-               for table_name in exog_inds], axis=1)
-    and endog is similar.
+    Here,
+    actual_data = concatenate(
+        [
+            tables[table_name].iloc[data_inds[table_name], :]
+            for table_name in data_inds
+        ],
+        axis=1,
+    )
     """
 
-    def __init__(self, endog_inds, exog_inds, tables, max_rows=None):
+    def __init__(self, data_inds, tables, max_rows=None):
         """
         Note that tables, as passed in, needs to be a dict-like with values
-        that can be passed into pandas.DataFrame.
+        that can be passed into to_dataframe.
 
-        endog_inds/exog_inds can be passed in as an ndarray, in which case
-        the columns will be ['y1'/'x1', etc.] which will be keys in tables.
+        data_inds will be passed through yx_to_dataframe.
         """
-        self.endog_inds = pd.DataFrame(
-            endog_inds, columns=generic_get_names(endog_inds, prefix="y")
-        )
-        self.exog_inds = pd.DataFrame(
-            exog_inds, columns=generic_get_names(exog_inds, prefix="x")
-        )
-        self.tables = {
-            table_name: pd.DataFrame(tables[table_name])
-            for table_name in tables
-        }
-        self.nobs = len(self.endog_inds)
+        self.data_inds = yx_to_dataframe(data_inds)
+        if not self.data_inds.size:
+            raise ValueError("data_inds is empty")
+        tables_dict = dict(tables)
+        self.tables = []
+        for table_name in self.data_inds.columns:
+            if table_name not in tables_dict:
+                raise ValueError(f"Missing '{table_name}' in tables")
+            df = to_dataframe(tables_dict[table_name])
+            self.tables.append(df)
+            col = self.data_inds[table_name]
+            if np.min(col) < -df.shape[0] or np.max(col) >= df.shape[0]:
+                msg = f"Out of bounds indices in data_inds[{table_name}]"
+                raise ValueError(msg)
 
-        self.endog_names = [
-            c
-            for table_name in self.endog_inds.columns
-            for c in self.tables[table_name]
-        ]
-        self.exog_names = [
-            c
-            for table_name in self.exog_inds.columns
-            for c in self.tables[table_name]
-        ]
-        self.endog_colinds = np.cumsum(
-            [0]
-            + [
-                tables[table_name].shape[1]
-                for table_name in self.endog_inds.columns
-            ]
-        )
-        self.exog_colinds = np.cumsum(
-            [0]
-            + [
-                tables[table_name].shape[1]
-                for table_name in self.exog_inds.columns
-            ]
-        )
+        table_widths = [df.shape[1] for df in self.tables]
+        self.colinds = np.cumsum([0] + table_widths)
 
-        self.endog_shape = (self.nobs, self.endog_colinds[-1])
-        self.exog_shape = (self.nobs, self.exog_colinds[-1])
-
-        self.endog_scratch = np.empty((max_rows, self.endog_shape[1]))
-        self.exog_scratch = np.empty((max_rows, self.exog_shape[1]))
-
+        self.nobs = len(self.data_inds)
+        self.shape = (self.nobs, self.colinds[-1])
+        self.columns = [c for df in self.tables for c in df.columns]
         if max_rows is None:
             max_rows = self.nobs
         self.max_rows = max_rows
 
-        assert len(self.endog_inds) == len(self.exog_inds)
-        assert self.endog_shape[1] and self.exog_shape[1]
-        assert len(self.endog_names) == len(set(self.endog_names))
-        assert len(self.exog_names) == len(set(self.exog_names))
+        self.scratch = np.empty((self.max_rows, self.shape[1]))
 
-    def xnames(self):
-        return self.exog_names
-
-    def ynames(self):
-        return self.endog_names
-
-    def get_endog_exog(self, start, stop):
-        for i in range(len(self.endog_inds.columns)):
+    def get_data(self, start, stop):
+        for i in range(len(self.tables)):
+            df = self.tables[i]
             table_name = self.endog_inds.columns[i]
-            self.endog_scratch[
+            self.scratch[
                 : stop - start,
-                self.endog_colinds[i] : self.endog_colinds[i + 1],
-            ] = self.tables[table_name].iloc[
-                self.endog_inds[table_name][start:stop, :]
-            ]
-        for i in range(len(self.exog_inds.columns)):
-            table_name = self.exog_inds.columns[i]
-            self.exog_scratch[
-                : stop - start, self.exog_colinds[i] : self.exog_colinds[i + 1]
-            ] = self.tables[table_name].iloc[
-                self.exog_inds[table_name][start:stop, :]
-            ]
-        return (
-            self.endog_scratch[: stop - start, :],
-            self.exog_scratch[: stop - start, :],
+                self.colinds[i] : self.colinds[i + 1],
+            ] = df.iloc[self.endog_inds[table_name].iloc[start:stop]]
+        return self.scratch[: stop - start, :]
+
+    def subdata(self, colnames):
+        col_to_i = self._col_to_i()
+        colnames_l = self._sorted_colnames(colnames, col_to_i)
+        if self.columns == colnames_l:
+            return self
+        data_inds = []
+        tables = {}
+        ti = -1
+        for c in colnames_l:
+            ci = col_to_i[c]
+            old_ti = ti
+            while ci >= self.colinds[ti + 1]:
+                ti += 1
+            table_name = self.data_inds.columns[ti]
+            if ti != old_ti:
+                data_inds.append(self.data_inds.iloc[:, ti])
+                tables[table_name] = []
+            tables[table_name].append(self.tables[ti][c])
+        return IndexedModelData(
+            pd.concat(data_inds, axis=1, copy=False),
+            {t: pd.concat(l, axis=1, copy=False) for t, l in tables.items()},
         )
